@@ -107,7 +107,6 @@ module LinkedData
     puts "(LD) >> Using Goo Redis instance at #{@settings.goo_redis_host}:#{@settings.goo_redis_port}"
 
     connect_goo unless overide_connect_goo
-    goo_namespaces
   end
 
   ##
@@ -197,4 +196,5 @@ module LinkedData
       conf.pluralize_models(true)
     end
   end
+  goo_namespaces
 end
