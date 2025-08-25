@@ -8,7 +8,7 @@ module LinkedData
   @settings = OpenStruct.new
   @settings_run = false
 
-  DEFAULT_PREFIX = 'http://data.bioontology.org/'.freeze
+  DEFAULT_PREFIX = ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')
 
   def config(&block)
     return if @settings_run
@@ -156,14 +156,14 @@ module LinkedData
       conf.add_namespace(:owl, RDF::Vocabulary.new('http://www.w3.org/2002/07/owl#'))
       conf.add_namespace(:rdf, RDF::Vocabulary.new('http://www.w3.org/1999/02/22-rdf-syntax-ns#'))
       conf.add_namespace(:rdfs, RDF::Vocabulary.new('http://www.w3.org/2000/01/rdf-schema#'))
-      conf.add_namespace(:metadata, RDF::Vocabulary.new("#{LinkedData.settings.rest_url_prefix}metadata/"),
+      conf.add_namespace(:metadata, RDF::Vocabulary.new("#{ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')}metadata/"),
                          default: true)
-      conf.add_namespace(:metadata_def, RDF::Vocabulary.new("#{LinkedData.settings.rest_url_prefix}metadata/def/"))
+      conf.add_namespace(:metadata_def, RDF::Vocabulary.new("#{ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')}metadata/def/"))
       conf.add_namespace(:dc, RDF::Vocabulary.new('http://purl.org/dc/elements/1.1/'))
       conf.add_namespace(:xsd, RDF::Vocabulary.new('http://www.w3.org/2001/XMLSchema#'))
       conf.add_namespace(:oboinowl_gen, RDF::Vocabulary.new('http://www.geneontology.org/formats/oboInOwl#'))
       conf.add_namespace(:obo_purl, RDF::Vocabulary.new('http://purl.obolibrary.org/obo/'))
-      conf.add_namespace(:umls, RDF::Vocabulary.new("#{LinkedData.settings.rest_url_prefix}ontologies/umls/"))
+      conf.add_namespace(:umls, RDF::Vocabulary.new("#{ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')}ontologies/umls/"))
       conf.add_namespace(:door, RDF::Vocabulary.new('http://kannel.open.ac.uk/ontology#'))
       conf.add_namespace(:dct, RDF::Vocabulary.new('http://purl.org/dc/terms/'))
 
