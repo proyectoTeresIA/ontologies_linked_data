@@ -192,7 +192,7 @@ module LinkedData
       conf.add_namespace(:dcterms, RDF::Vocabulary.new('http://purl.org/dc/terms/'))
       conf.add_namespace(:uneskos, RDF::Vocabulary.new('http://purl.org/umu/uneskos#'))
 
-      conf.id_prefix = LinkedData.settings.id_url_prefix
+      conf.id_prefix = ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')
       conf.pluralize_models(true)
     end
   end
