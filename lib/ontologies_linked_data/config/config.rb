@@ -191,6 +191,12 @@ module LinkedData
       conf.add_namespace(:skosxl, RDF::Vocabulary.new('http://www.w3.org/2008/05/skos-xl#'))
       conf.add_namespace(:dcterms, RDF::Vocabulary.new('http://purl.org/dc/terms/'))
       conf.add_namespace(:uneskos, RDF::Vocabulary.new('http://purl.org/umu/uneskos#'))
+      # OntoLex and related vocabularies
+      conf.add_namespace(:ontolex, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/ontolex#'))
+      conf.add_namespace(:lexinfo, RDF::Vocabulary.new('http://www.lexinfo.net/ontology/3.0/lexinfo#'))
+      conf.add_namespace(:vartrans, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/vartrans#'))
+      # TermLex (TERMINOLOGY) proposal namespace used in docs; may not exist in all datasets
+      conf.add_namespace(:termlex, RDF::Vocabulary.new('http://purl.org/termlex#'))
 
       conf.id_prefix = ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')
       conf.pluralize_models(true)

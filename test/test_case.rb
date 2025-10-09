@@ -38,7 +38,7 @@ if ENV['OVERRIDE_CONFIG'] == 'true'
   end
 end
 
-require_relative '../config/config'
+require_relative '../config/config.test'
 require 'minitest/unit'
 MiniTest::Unit.autorun
 

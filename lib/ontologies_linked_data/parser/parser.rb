@@ -12,3 +12,4 @@ module LinkedData
   end
 end
 require_relative "owlapi"
+require_relative "ontolex"

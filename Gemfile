@@ -19,7 +19,7 @@ gem 'rsolr'
 gem 'rubyzip', '~> 1.0'
 gem 'thin'
 gem 'request_store'
-
+gem 'rdf-turtle'
 
 # Testing
 group :test do

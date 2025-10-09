@@ -1,0 +1,15 @@
+<http://example.org/concept1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2004/02/skos/core#Concept> .
+<http://example.org/concept1> <http://www.w3.org/2004/02/skos/core#prefLabel> "Test concept"@en .
+<http://example.org/concept1> <http://www.w3.org/2004/02/skos/core#definition> "A simple concept"@en .
+
+<http://example.org/entry1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/lemon/ontolex#LexicalEntry> .
+<http://example.org/entry1> <http://www.w3.org/ns/lemon/ontolex#canonicalForm> <http://example.org/form1> .
+<http://example.org/entry1> <http://www.w3.org/ns/lemon/ontolex#sense> <http://example.org/sense1> .
+<http://example.org/entry1> <http://www.w3.org/ns/lemon/ontolex#evokes> <http://example.org/concept1> .
+
+<http://example.org/form1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/lemon/ontolex#Form> .
+<http://example.org/form1> <http://www.w3.org/ns/lemon/ontolex#writtenRep> "test"@en .
+
+<http://example.org/sense1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/lemon/ontolex#LexicalSense> .
+<http://example.org/sense1> <http://purl.org/dc/terms/definition> "Definition text"@en .
+<http://example.org/sense1> <http://www.w3.org/ns/lemon/ontolex#isLexicalizedSenseOf> <http://example.org/concept1> .
