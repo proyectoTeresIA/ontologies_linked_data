@@ -28,6 +28,7 @@ module LinkedData
         page = 0
         size = 1000
         count_classes = 0
+        count_lexical = 0
 
         time = Benchmark.realtime do
           @submission.bring(:ontology) if @submission.bring?(:ontology)
@@ -191,6 +192,43 @@ module LinkedData
             LinkedData::Models::Class.indexOptimize()
           end
           logger.info("Completed optimizing ontology terms index in #{time} sec.")
+        end
+
+        # --- OntoLex Lexical Entries indexing ---
+        begin
+          RequestStore.store[:requested_lang] = :ALL
+          # Unindex all lexical docs for this ontology
+          @submission.ontology.bring(:acronym) if @submission.ontology.bring?(:acronym)
+          query = "submissionAcronym:#{@submission.ontology.acronym}"
+          LinkedData::Models::Ontology.unindexByQuery(query, :lexical)
+          LinkedData::Models::Ontology.indexCommit(nil, :lexical) if commit
+
+          logger.info("Indexing OntoLex lexical entries: #{@submission.ontology.acronym}...")
+          page = 1
+          size = 1000
+          paging = LinkedData::Models::OntoLex::LexicalEntry.in(@submission).include(:form, :sense).page(page, size)
+          entries = paging.all
+          count_lexical += entries.length
+          while entries.any?
+            LinkedData::Models::OntoLex::LexicalEntry.indexBatch(entries, :lexical)
+            page += 1
+            entries = paging.page(page, size).all
+            count_lexical += entries.length
+          end
+
+          if commit
+            LinkedData::Models::OntoLex::LexicalEntry.indexCommit(nil, :lexical)
+          end
+
+          if optimize
+            LinkedData::Models::OntoLex::LexicalEntry.indexOptimize(nil, :lexical)
+          end
+
+          logger.info("Completed indexing OntoLex entries: #{@submission.ontology.acronym}. #{count_lexical} entries indexed.")
+          logger.flush
+        rescue StandardError => e
+          logger.error("Error indexing OntoLex lexical entries for #{@submission.ontology.acronym}: #{e.class}: #{e.message}\n#{e.backtrace.join("\n\t")}")
+          logger.flush
         end
       end
 

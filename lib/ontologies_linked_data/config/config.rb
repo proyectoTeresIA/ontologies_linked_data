@@ -26,6 +26,7 @@ module LinkedData
     @settings.goo_path_update               ||= '/update/'
     @settings.search_server_url             ||= 'http://localhost:8983/solr/term_search_core1'
     @settings.property_search_server_url    ||= 'http://localhost:8983/solr/prop_search_core1'
+    @settings.lexical_search_server_url     ||= ENV.fetch('SOLR_LEXICAL_SEARCH_URL', 'http://localhost:8983/solr/lexical_search_core1')
     @settings.repository_folder             ||= './test/data/ontology_files/repo'
     @settings.rest_url_prefix               ||= DEFAULT_PREFIX
     @settings.enable_security               ||= false
@@ -102,7 +103,8 @@ module LinkedData
 
     puts "(LD) >> Using rdf store #{@settings.goo_host}:#{@settings.goo_port}#{@settings.goo_path_query}"
     puts "(LD) >> Using term search server at #{@settings.search_server_url}"
-    puts "(LD) >> Using property search server at #{@settings.property_search_server_url}"
+  puts "(LD) >> Using property search server at #{@settings.property_search_server_url}"
+  puts "(LD) >> Using lexical search server at #{@settings.lexical_search_server_url}" if @settings.lexical_search_server_url
     puts "(LD) >> Using HTTP Redis instance at #{@settings.http_redis_host}:#{@settings.http_redis_port}"
     puts "(LD) >> Using Goo Redis instance at #{@settings.goo_redis_host}:#{@settings.goo_redis_port}"
 
@@ -130,6 +132,10 @@ module LinkedData
                                 options: { rules: :NONE })
         conf.add_search_backend(:main, service: @settings.search_server_url)
         conf.add_search_backend(:property, service: @settings.property_search_server_url)
+        # Register lexical backend if configured
+        if @settings.lexical_search_server_url
+          conf.add_search_backend(:lexical, service: @settings.lexical_search_server_url)
+        end
         conf.add_redis_backend(host: @settings.goo_redis_host,
                                port: @settings.goo_redis_port)
 
