@@ -42,8 +42,10 @@ module LinkedData
         # Compute Solr document for lexical entries
         def index_doc(to_set=nil)
           doc = {}
-          # Required: original resource IRI to populate resource_id
-          doc[:id] = self.id.to_s
+          # Required fields: stable unique id for this submission and original resource IRI
+          # Use a stable per-submission unique id for the Solr document, similar to classes/properties
+          doc[:id] = self.index_id || self.id.to_s
+          doc[:resource_id] = self.id.to_s
           self.bring(:submission) if self.bring?(:submission)
           return doc unless self.submission
 
