@@ -11,21 +11,47 @@ module LinkedData
         attribute :partOfSpeech, namespace: :lexinfo
         attribute :entryType, namespace: :ontolex
         attribute :form, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
+  attribute :canonicalForm, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
+  attribute :otherForm, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
         attribute :sense, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::LexicalSense }
         attribute :concept, namespace: :ontolex, property: :evokes, range: -> { LinkedData::Models::OntoLex::LexicalConcept }
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
 
         # Hypermedia
-        embed :form, :sense
-        serialize_default :lemma, :language, :partOfSpeech, :entryType, :form, :sense
+  embed :form, :canonicalForm, :otherForm, :sense
+  serialize_default :lemma, :language, :partOfSpeech, :entryType, :sense
         serialize_never :submission
-        serialize_methods :properties
+  serialize_methods :properties, :form
         links_load submission: [ontology: [:acronym]]
         link_to LinkedData::Hypermedia::Link.new('self', ->(s) { "ontologies/#{s.submission.ontology.acronym}/lexical_entries/#{CGI.escape(s.id.to_s)}" }, self.uri_type),
                 LinkedData::Hypermedia::Link.new('ontology', ->(s) { "ontologies/#{s.submission.ontology.acronym}" }, Goo.vocabulary['Ontology'])
 
         def properties
           self.unmapped
+        end
+
+        # Combine all forms (generic, canonical, and other) into a single 'form' output
+        def form
+          # Ensure attributes are brought if present
+          self.bring(:form) if self.bring?(:form)
+          self.bring(:canonicalForm) if self.bring?(:canonicalForm)
+          self.bring(:otherForm) if self.bring?(:otherForm)
+          forms = []
+          begin
+            Array(self.attributes.include?(:form) ? super() : self.send(:form)).each { |f| forms << f if f }
+          rescue NoMethodError
+            # In case super isn't available due to attribute override
+            forms.concat(Array(self.instance_variable_get(:@form))) if self.instance_variable_defined?(:@form)
+          end
+          forms.concat(Array(self.canonicalForm)) if respond_to?(:canonicalForm)
+          forms.concat(Array(self.otherForm)) if respond_to?(:otherForm)
+          # De-duplicate by ID if available
+          seen = {}
+          forms.compact.select do |f|
+            key = f.respond_to?(:id) ? f.id.to_s : f.to_s
+            next false if key.nil? || key.empty?
+            !seen.put_if_absent(key, true)
+          end
         end
 
         # Build a stable per-submission Solr id similar to Class/Property
