@@ -238,7 +238,10 @@ class Object
     current_cls = self.respond_to?(:klass) ? self.klass : self.class
 
     # Look for default attributes or use all
-    if !current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) || current_cls.hypermedia_settings[:serialize_default].empty? || all
+    if current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) && all
+      # For API resources, when client requests display=all, serialize ALL declared attributes
+      attributes = current_cls.attributes
+    elsif !current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) || current_cls.hypermedia_settings[:serialize_default].empty?
       attributes = self.is_a?(Struct) ? self.members : self.instance_variables.map {|e| e.to_s.delete("@").to_sym }
 
       attributes = attributes - do_not_serialize_nested(options)

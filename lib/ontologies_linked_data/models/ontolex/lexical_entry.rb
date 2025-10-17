@@ -47,11 +47,17 @@ module LinkedData
           forms.concat(Array(self.otherForm)) if respond_to?(:otherForm)
           # De-duplicate by ID if available
           seen = {}
-          forms.compact.select do |f|
+          forms = forms.compact.select do |f|
             key = f.respond_to?(:id) ? f.id.to_s : f.to_s
             next false if key.nil? || key.empty?
-            !seen.put_if_absent(key, true)
+            if seen[key]
+              false
+            else
+              seen[key] = true
+              true
+            end
           end
+          forms
         end
 
         # Build a stable per-submission Solr id similar to Class/Property
