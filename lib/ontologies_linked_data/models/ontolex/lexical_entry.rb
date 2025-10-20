@@ -11,17 +11,18 @@ module LinkedData
         attribute :partOfSpeech, namespace: :lexinfo
         attribute :entryType, namespace: :ontolex
         attribute :form, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
-  attribute :canonicalForm, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
-  attribute :otherForm, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
+        attribute :canonicalForm, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
+        attribute :otherForm, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::Form }
         attribute :sense, namespace: :ontolex, range: -> { LinkedData::Models::OntoLex::LexicalSense }
         attribute :concept, namespace: :ontolex, property: :evokes, range: -> { LinkedData::Models::OntoLex::LexicalConcept }
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
 
-        # Hypermedia
-  embed :form, :canonicalForm, :otherForm, :sense
-  serialize_default :lemma, :language, :partOfSpeech, :entryType, :sense
+        # Hypermedia / serialization
+        # Avoid eager-loading potentially blank-node linked resources; compute via methods instead
+        do_not_load :form, :canonicalForm, :otherForm, :sense
+        serialize_default :lemma, :language, :partOfSpeech, :entryType
         serialize_never :submission
-  serialize_methods :properties, :form
+        serialize_methods :properties, :form, :sense
         links_load submission: [ontology: [:acronym]]
         link_to LinkedData::Hypermedia::Link.new('self', ->(s) { "ontologies/#{s.submission.ontology.acronym}/lexical_entries/#{CGI.escape(s.id.to_s)}" }, self.uri_type),
                 LinkedData::Hypermedia::Link.new('ontology', ->(s) { "ontologies/#{s.submission.ontology.acronym}" }, Goo.vocabulary['Ontology'])
@@ -30,34 +31,97 @@ module LinkedData
           self.unmapped
         end
 
-        # Combine all forms (generic, canonical, and other) into a single 'form' output
+        # Compute forms via SPARQL to avoid loading blank nodes via Goo; include generic/canonical/other
         def form
-          # Ensure attributes are brought if present
-          self.bring(:form) if self.bring?(:form)
-          self.bring(:canonicalForm) if self.bring?(:canonicalForm)
-          self.bring(:otherForm) if self.bring?(:otherForm)
-          forms = []
+          return @computed_forms if defined?(@computed_forms)
+          return [] unless self.submission
+
+          graph = self.submission.id
+          s = self.id
+          form_p = 'http://www.w3.org/ns/lemon/ontolex#form'
+          can_p  = 'http://www.w3.org/ns/lemon/ontolex#canonicalForm'
+          oth_p  = 'http://www.w3.org/ns/lemon/ontolex#otherForm'
+          wr_p   = 'http://www.w3.org/ns/lemon/ontolex#writtenRep'
+          lang_p = 'http://purl.org/dc/terms/language'
+          ft_p   = 'http://www.w3.org/ns/lemon/ontolex#formType'
+
+          qry = [
+            "SELECT ?f ?w ?l ?ft WHERE {",
+            "  GRAPH <#{graph}> {",
+            "    VALUES ?s { <#{s}> }",
+            "    { ?s <#{form_p}> ?f } UNION { ?s <#{can_p}> ?f } UNION { ?s <#{oth_p}> ?f } .",
+            "    OPTIONAL { ?f <#{wr_p}> ?w }",
+            "    OPTIONAL { ?f <#{lang_p}> ?l }",
+            "    OPTIONAL { ?f <#{ft_p}> ?ft }",
+            "  }",
+            "}"
+          ].join("\n")
+
+          epr = Goo.sparql_query_client(:main)
+          buckets = {}
           begin
-            Array(self.attributes.include?(:form) ? super() : self.send(:form)).each { |f| forms << f if f }
-          rescue NoMethodError
-            # In case super isn't available due to attribute override
-            forms.concat(Array(self.instance_variable_get(:@form))) if self.instance_variable_defined?(:@form)
-          end
-          forms.concat(Array(self.canonicalForm)) if respond_to?(:canonicalForm)
-          forms.concat(Array(self.otherForm)) if respond_to?(:otherForm)
-          # De-duplicate by ID if available
-          seen = {}
-          forms = forms.compact.select do |f|
-            key = f.respond_to?(:id) ? f.id.to_s : f.to_s
-            next false if key.nil? || key.empty?
-            if seen[key]
-              false
-            else
-              seen[key] = true
-              true
+            epr.query(qry, graphs: [graph]).each do |row|
+              fid_term = row[:f]
+              fid = fid_term.is_a?(RDF::URI) ? fid_term : skolemize(fid_term)
+              key = fid.to_s
+              buckets[key] ||= { id: fid, submission: self.submission, writtenRep: [], language: [], formType: [] }
+              buckets[key][:writtenRep] << row[:w].to_s if row[:w]
+              buckets[key][:language] << row[:l].to_s if row[:l]
+              buckets[key][:formType] << row[:ft].to_s if row[:ft]
             end
+          rescue StandardError
           end
-          forms
+          @computed_forms = buckets.values.map do |attrs|
+            LinkedData::Models::OntoLex::Form.read_only(attrs)
+          end
+          @computed_forms
+        end
+
+        # Compute senses via SPARQL to avoid loading blank nodes via Goo
+        def sense
+          return @computed_senses if defined?(@computed_senses)
+          return [] unless self.submission
+
+          graph = self.submission.id
+          s = self.id
+          sense_p = 'http://www.w3.org/ns/lemon/ontolex#sense'
+          def_p   = 'http://purl.org/dc/terms/definition'
+          ex_p    = 'http://purl.org/dc/terms/example'
+          ref_p   = 'http://www.w3.org/ns/lemon/ontolex#reference'
+          lc_p    = 'http://www.w3.org/ns/lemon/ontolex#isLexicalizedSenseOf'
+
+          qry = [
+            "SELECT ?se ?d ?e ?r ?lc WHERE {",
+            "  GRAPH <#{graph}> {",
+            "    VALUES ?s { <#{s}> }",
+            "    ?s <#{sense_p}> ?se .",
+            "    OPTIONAL { ?se <#{def_p}> ?d }",
+            "    OPTIONAL { ?se <#{ex_p}> ?e }",
+            "    OPTIONAL { ?se <#{ref_p}> ?r }",
+            "    OPTIONAL { ?se <#{lc_p}> ?lc }",
+            "  }",
+            "}"
+          ].join("\n")
+
+          epr = Goo.sparql_query_client(:main)
+          buckets = {}
+          begin
+            epr.query(qry, graphs: [graph]).each do |row|
+              sid_term = row[:se]
+              sid = sid_term.is_a?(RDF::URI) ? sid_term : skolemize(sid_term)
+              key = sid.to_s
+              buckets[key] ||= { id: sid, submission: self.submission, definition: [], example: [], reference: [], lexicalConcept: [] }
+              buckets[key][:definition] << row[:d].to_s if row[:d]
+              buckets[key][:example] << row[:e].to_s if row[:e]
+              buckets[key][:reference] << row[:r].to_s if row[:r]
+              buckets[key][:lexicalConcept] << row[:lc].to_s if row[:lc]
+            end
+          rescue StandardError
+          end
+          @computed_senses = buckets.values.map do |attrs|
+            LinkedData::Models::OntoLex::LexicalSense.read_only(attrs)
+          end
+          @computed_senses
         end
 
         # Build a stable per-submission Solr id similar to Class/Property
@@ -180,6 +244,14 @@ module LinkedData
         # Route searches to the lexical backend (Solr core)
         def self.search(q, params={})
           super(q, params, :lexical)
+        end
+
+        private
+        # Convert blank nodes into stable Skolem IRIs for API serialization
+        def skolemize(term)
+          return term if term.is_a?(RDF::URI)
+          label = term.to_s.sub(/^_:/, '')
+          RDF::URI.new("#{LinkedData.settings.id_url_prefix}/.well-known/genid/ontolex/#{self.submission&.submissionId}/#{CGI.escape(label)}")
         end
       end
     end

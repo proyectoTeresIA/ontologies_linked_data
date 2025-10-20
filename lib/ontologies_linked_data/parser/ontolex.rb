@@ -104,7 +104,7 @@ module LinkedData
             lc.definition = values_for(graph, id, SKOS.definition)
             lc.broader = values_for(graph, id, SKOS.broader)
             lc.narrower = values_for(graph, id, SKOS.narrower)
-            lc.in(submission).save if lc.valid?
+            lc.save if lc.valid?
             concepts << lc
           end
           concepts
@@ -123,7 +123,7 @@ module LinkedData
               langs << vs.object.language.to_s if vs.object.respond_to?(:language) && vs.object.language
             end
             f.language = langs.uniq unless langs.empty?
-            f.in(submission).save if f.valid?
+            f.save if f.valid?
             forms[id] = f
           end
           forms
@@ -142,7 +142,7 @@ module LinkedData
               concept = concepts_by_id.find { |c| c.id == vs.object }
               s.lexicalConcept = [concept] if concept
             end
-            s.in(submission).save if s.valid?
+            s.save if s.valid?
             senses[id] = s
           end
           senses
@@ -173,7 +173,7 @@ module LinkedData
               concepts << vs.object
             end
             e.concept = concepts unless concepts.empty?
-            e.in(submission).save if e.valid?
+            e.save if e.valid?
             entries << e
           end
           entries
