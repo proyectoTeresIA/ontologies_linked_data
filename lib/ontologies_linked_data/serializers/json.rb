@@ -12,6 +12,16 @@ module LinkedData
           current_cls = hashed_obj.respond_to?(:klass) ? hashed_obj.klass : hashed_obj.class
           result_lang = self.get_languages(get_object_submission(hashed_obj), options[:lang])
 
+          # Intentionally no OntoLex::LexicalConcept enrichment here: models/controllers handle it
+
+          # Removed LexicalSense enrichment here to avoid duplication; models ensure fields.
+
+          # Intentionally no OntoLex::Form enrichment here: models + controllers ensure parity
+
+          # Intentionally no LexicalEntry relation backfill here: model to_hash provides IRIs
+
+          # Intentionally no definition reshaping here: handled in LexicalConcept#to_hash
+
           # Add the id to json-ld attribute
           if current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) && !current_cls.embedded? && hashed_obj.respond_to?(:id)
             prefixed_id = LinkedData::Models::Base.replace_url_id_to_prefix(hashed_obj.id)
@@ -39,13 +49,108 @@ module LinkedData
             end
           end
           hash['@context']['@language'] = result_lang if hash['@context']
+
+          # Do not leak submission on read_only structs
+          hash.delete('submission') if hash.key?('submission')
+          hash.delete(:submission) if hash.key?(:submission)
+        end
+        # Coerce any RDF objects (URI, Vocabulary terms) into plain strings to avoid
+        # ActiveSupport JSON trying to introspect them (which triggers Goo's method_missing)
+        begin
+          hash = stringify_rdf_objects(hash)
+        rescue StandardError
+        end
+        # Normalize keys to strings and merge duplicates from symbol/string collisions
+        begin
+          hash = normalize_keys_and_dedup(hash)
+        rescue StandardError
         end
         MultiJson.dump(hash)
       end
 
       private
 
+      def self.stringify_rdf_objects(obj)
+        # Convert RDF::URI, RDF::Node, RDF::Vocabulary terms into strings recursively
+        if defined?(RDF)
+          return obj.to_s if obj.is_a?(RDF::URI) || obj.is_a?(RDF::Node)
+          # Many RDF vocab terms respond to to_uri
+          if !obj.is_a?(String) && obj.respond_to?(:to_uri)
+            begin
+              return obj.to_uri.to_s
+            rescue StandardError
+              # fall through
+            end
+          end
+        end
+        case obj
+        when Array
+          obj.map { |v| stringify_rdf_objects(v) }
+        when Hash
+          obj.each_with_object({}) do |(k, v), acc|
+            acc[k] = stringify_rdf_objects(v)
+          end
+        else
+          # Coerce any non-primitive, non-nil object to string to avoid ActiveSupport as_json introspection
+          if obj.nil? || obj.is_a?(Numeric) || obj.is_a?(TrueClass) || obj.is_a?(FalseClass) || obj.is_a?(String)
+            obj
+          else
+            begin
+              obj.to_s
+            rescue StandardError
+              obj.inspect
+            end
+          end
+        end
+      end
+
+      # Convert all hash keys to strings and merge duplicates caused by symbol/string collisions.
+      # For arrays, keep order and de-duplicate values. For nested hashes, apply recursively.
+      def self.normalize_keys_and_dedup(obj)
+        case obj
+        when Array
+          obj.map { |v| normalize_keys_and_dedup(v) }
+        when Hash
+          acc = {}
+          obj.each do |k, v|
+            sk = k.to_s
+            nv = normalize_keys_and_dedup(v)
+            if acc.key?(sk)
+              acc[sk] = merge_values(acc[sk], nv)
+            else
+              acc[sk] = nv
+            end
+          end
+          acc
+        else
+          obj
+        end
+      end
+
+      def self.merge_values(a, b)
+        # If both are arrays, concatenate then uniq while preserving order
+        if a.is_a?(Array) && b.is_a?(Array)
+          seen = {}
+          (a + b).each_with_object([]) do |e, arr|
+            key = e.is_a?(Hash) ? e.hash : e
+            next if seen[key]
+            arr << e
+            seen[key] = true
+          end
+        elsif a.is_a?(Hash) && b.is_a?(Hash)
+          # Merge nested hashes recursively with string keys
+          normalize_keys_and_dedup(a.merge(b) { |_, v1, v2| merge_values(v1, v2) })
+        else
+          # Prefer 'a' when present; do not overwrite empty arrays/strings with nil
+          return a unless a.nil?
+          b
+        end
+      end
+
       def self.get_object_submission(obj)
+        # Prefer direct submission accessor when present (works for read_only structs)
+        return obj.submission if obj.respond_to?(:submission) && !obj.submission.nil?
+        # Otherwise, check class attributes for Resource instances
         obj.class.respond_to?(:attributes) && obj.class.attributes.include?(:submission) ? obj.submission : nil
       end
 

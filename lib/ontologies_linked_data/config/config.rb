@@ -201,6 +201,7 @@ module LinkedData
       conf.add_namespace(:ontolex, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/ontolex#'))
       conf.add_namespace(:lexinfo, RDF::Vocabulary.new('http://www.lexinfo.net/ontology/3.0/lexinfo#'))
       conf.add_namespace(:vartrans, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/vartrans#'))
+      conf.add_namespace(:lexicog, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/lexicog#'))
       # TermLex (TERMINOLOGY) proposal namespace used in docs; may not exist in all datasets
       conf.add_namespace(:termlex, RDF::Vocabulary.new('http://purl.org/termlex#'))
 

@@ -3,27 +3,33 @@ module LinkedData
     class Metric < LinkedData::Models::Base
       model :metrics, name_with: lambda { |m| metrics_id_generator(m) }
       attribute :submission, inverse: { on: :ontology_submission,
-                                     attribute: :metrics }
+                                        attribute: :metrics }
 
       attribute :created, enforce: [:date_time],
-                :default => lambda { |record| DateTime.now }
+                          :default => lambda { |record| DateTime.now }
 
-      attribute :classes, enforce: [:integer,:existence]
-      attribute :individuals, enforce: [:integer,:existence]
-      attribute :properties, enforce: [:integer,:existence]
-      attribute :maxDepth, enforce: [:integer,:existence]
-      attribute :maxChildCount, enforce: [:integer,:existence]
-      attribute :averageChildCount, enforce: [:integer,:existence]
-      attribute :classesWithOneChild, enforce: [:integer,:existence]
-      attribute :classesWithMoreThan25Children, enforce: [:integer,:existence]
-      attribute :classesWithNoDefinition, enforce: [:integer,:existence]
+      attribute :classes, enforce: [:integer, :existence]
+      attribute :individuals, enforce: [:integer, :existence]
+      attribute :properties, enforce: [:integer, :existence]
+      attribute :maxDepth, enforce: [:integer, :existence]
+      attribute :maxChildCount, enforce: [:integer, :existence]
+      attribute :averageChildCount, enforce: [:integer, :existence]
+      attribute :classesWithOneChild, enforce: [:integer, :existence]
+      attribute :classesWithMoreThan25Children, enforce: [:integer, :existence]
+      attribute :classesWithNoDefinition, enforce: [:integer, :existence]
+
+      # OntoLex metrics
+      attribute :ontolexEntries, enforce: [:integer]
+      attribute :ontolexForms, enforce: [:integer]
+      attribute :ontolexSenses, enforce: [:integer]
+      attribute :ontolexConcepts, enforce: [:integer]
 
       cache_timeout 14400 # 4 hours
 
       # Hypermedia links
       links_load submission: [:submissionId, ontology: [:acronym]]
-      link_to LinkedData::Hypermedia::Link.new("ontology", lambda {|m| "#{self.ontology_submission_links(m)[:ont]}"}, Goo.vocabulary["Ontology"]),
-              LinkedData::Hypermedia::Link.new("submission", lambda {|m| "#{self.ontology_submission_links(m)[:ont]}#{ontology_submission_links(m)[:sub]}"}, Goo.vocabulary["OntologySubmission"])
+      link_to LinkedData::Hypermedia::Link.new("ontology", lambda { |m| "#{self.ontology_submission_links(m)[:ont]}" }, Goo.vocabulary["Ontology"]),
+              LinkedData::Hypermedia::Link.new("submission", lambda { |m| "#{self.ontology_submission_links(m)[:ont]}#{ontology_submission_links(m)[:sub]}" }, Goo.vocabulary["OntologySubmission"])
 
       def self.ontology_submission_links(m)
         acronym_link = ""
@@ -44,7 +50,7 @@ module LinkedData
           end
         end
 
-        {ont: acronym_link, sub: submission_link}
+        { ont: acronym_link, sub: submission_link }
       end
 
       def self.metrics_id_generator(m)

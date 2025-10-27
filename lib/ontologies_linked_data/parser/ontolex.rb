@@ -2,6 +2,7 @@ require 'rdf'
 require 'rdf/turtle'
 require 'rdf/ntriples'
 require 'addressable/uri'
+require 'cgi'
 require 'set'
 
 module LinkedData
@@ -31,9 +32,9 @@ module LinkedData
           STDERR.puts("[OntoLex] LexicalEntry subjects: #{subjects_of_type(graph, ONTOLEX.LexicalEntry).size}")
           STDERR.puts("[OntoLex] LexicalSense subjects: #{subjects_of_type(graph, ONTOLEX.LexicalSense).size}")
           STDERR.puts("[OntoLex] Form subjects: #{subjects_of_type(graph, ONTOLEX.Form).size}")
-          concepts = index_concepts(graph, submission)
+          concepts_by_id, concepts = index_concepts(graph, submission)
           forms    = index_forms(graph, submission)
-          senses   = index_senses(graph, submission, concepts)
+          senses   = index_senses(graph, submission, concepts_by_id)
           entries  = index_entries(graph, submission, forms, senses)
           { entries: entries, senses: senses, concepts: concepts, forms: forms }
         end
@@ -96,35 +97,39 @@ module LinkedData
 
         def index_concepts(graph, submission)
           concepts = []
+          concepts_by_id = {}
           ids = subjects_of_type(graph, ONTOLEX.LexicalConcept) | subjects_of_type(graph, SKOS.Concept)
-          ids.each do |id|
+          ids.each do |orig_id|
+            id = skolemize_id(orig_id, submission, 'concept')
             lc = LinkedData::Models::OntoLex::LexicalConcept.new(id: id)
             lc.submission = submission
-            lc.prefLabel = values_for(graph, id, SKOS.prefLabel)
-            lc.definition = values_for(graph, id, SKOS.definition)
-            lc.broader = values_for(graph, id, SKOS.broader)
-            lc.narrower = values_for(graph, id, SKOS.narrower)
+            lc.prefLabel = values_for(graph, orig_id, SKOS.prefLabel)
+            lc.definition = values_for(graph, orig_id, SKOS.definition)
+            lc.broader = values_for(graph, orig_id, SKOS.broader)
+            lc.narrower = values_for(graph, orig_id, SKOS.narrower)
             lc.save if lc.valid?
             concepts << lc
+            concepts_by_id[orig_id] = lc
           end
-          concepts
+          [concepts_by_id, concepts]
         end
 
         def index_forms(graph, submission)
           forms = {}
           ids = subjects_of_type(graph, ONTOLEX.Form)
-          ids.each do |id|
+          ids.each do |orig_id|
+            id = skolemize_id(orig_id, submission, 'form')
             f = LinkedData::Models::OntoLex::Form.new(id: id)
             f.submission = submission
-            f.writtenRep = values_for(graph, id, ONTOLEX.writtenRep)
-            f.formType   = values_for(graph, id, ONTOLEX.formType)
+            f.writtenRep = values_for(graph, orig_id, ONTOLEX.writtenRep)
+            f.formType   = values_for(graph, orig_id, ONTOLEX.formType)
             langs = []
-            graph.query(subject: id, predicate: conv_uri(ONTOLEX.writtenRep)).each do |vs|
+            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.writtenRep)).each do |vs|
               langs << vs.object.language.to_s if vs.object.respond_to?(:language) && vs.object.language
             end
             f.language = langs.uniq unless langs.empty?
             f.save if f.valid?
-            forms[id] = f
+            forms[orig_id] = f
           end
           forms
         end
@@ -132,18 +137,19 @@ module LinkedData
         def index_senses(graph, submission, concepts_by_id)
           senses = {}
           ids = subjects_of_type(graph, ONTOLEX.LexicalSense)
-          ids.each do |id|
+          ids.each do |orig_id|
+            id = skolemize_id(orig_id, submission, 'sense')
             s = LinkedData::Models::OntoLex::LexicalSense.new(id: id)
             s.submission  = submission
-            s.definition  = values_for(graph, id, DCTERMS.definition)
-            s.example     = values_for(graph, id, DCTERMS.example)
-            s.reference   = values_for(graph, id, ONTOLEX.reference)
-            graph.query(subject: id, predicate: conv_uri(ONTOLEX.isLexicalizedSenseOf)).each do |vs|
-              concept = concepts_by_id.find { |c| c.id == vs.object }
+            s.definition  = values_for(graph, orig_id, DCTERMS.definition)
+            s.example     = values_for(graph, orig_id, DCTERMS.example)
+            s.reference   = values_for(graph, orig_id, ONTOLEX.reference)
+            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.isLexicalizedSenseOf)).each do |vs|
+              concept = concepts_by_id[vs.object]
               s.lexicalConcept = [concept] if concept
             end
             s.save if s.valid?
-            senses[id] = s
+            senses[orig_id] = s
           end
           senses
         end
@@ -151,25 +157,26 @@ module LinkedData
         def index_entries(graph, submission, forms_by_id, senses_by_id)
           entries = []
           ids = subjects_of_type(graph, ONTOLEX.LexicalEntry)
-          ids.each do |id|
+          ids.each do |orig_id|
+            id = skolemize_id(orig_id, submission, 'entry')
             e = LinkedData::Models::OntoLex::LexicalEntry.new(id: id)
             e.submission = submission
-            e.lemma      = values_for(graph, id, ONTOLEX.canonicalForm)
-            e.language   = values_for(graph, id, DCTERMS.language)
-            e.partOfSpeech = values_for(graph, id, LEXINFO.partOfSpeech)
+            e.lemma      = values_for(graph, orig_id, ONTOLEX.canonicalForm)
+            e.language   = values_for(graph, orig_id, DCTERMS.language)
+            e.partOfSpeech = values_for(graph, orig_id, LEXINFO.partOfSpeech)
             forms = []
             [ONTOLEX.canonicalForm, ONTOLEX.otherForm, ONTOLEX.lexicalForm].each do |pf|
-              graph.query(subject: id, predicate: conv_uri(pf)).each { |vs| forms << forms_by_id[vs.object] if forms_by_id[vs.object] }
+              graph.query(subject: orig_id, predicate: conv_uri(pf)).each { |vs| forms << forms_by_id[vs.object] if forms_by_id[vs.object] }
             end
             e.form = forms unless forms.empty?
             linked_senses = []
-            graph.query(subject: id, predicate: conv_uri(ONTOLEX.sense)).each do |vs|
+            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.sense)).each do |vs|
               s = senses_by_id[vs.object]
               linked_senses << s if s
             end
             e.sense = linked_senses unless linked_senses.empty?
             concepts = []
-            graph.query(subject: id, predicate: conv_uri(ONTOLEX.evokes)).each do |vs|
+            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.evokes)).each do |vs|
               concepts << vs.object
             end
             e.concept = concepts unless concepts.empty?
@@ -200,6 +207,16 @@ module LinkedData
 
         def conv_uri(term)
           term.respond_to?(:to_uri) ? term.to_uri : term
+        end
+
+        # Mint a stable URI for blank node subjects on ingestion time to avoid RDF::Node IDs
+        # The URI format uses the instance id_url_prefix and submission to remain stable per submission
+        def skolemize_id(term, submission, kind)
+          return term if term.is_a?(RDF::URI)
+          # Build a deterministic token from the RDF::Node identifier
+          node_id = term.to_s.gsub(/^_:/, '')
+          prefix = LinkedData.settings.id_url_prefix || 'http://example.org'
+          RDF::URI.new("#{prefix}/.well-known/genid/ontolex/#{submission&.submissionId}/#{kind}/#{CGI.escape(node_id)}")
         end
       end
     end

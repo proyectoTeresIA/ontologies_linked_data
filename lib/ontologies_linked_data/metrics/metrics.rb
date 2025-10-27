@@ -34,6 +34,23 @@ module LinkedData
         logger.info("properties finished")
         logger.flush
 
+        # OntoLex counts
+        begin
+          o_entries = LinkedData::Models::OntoLex::LexicalEntry.count_in_submission(submission)
+          o_forms   = LinkedData::Models::OntoLex::Form.count_in_submission(submission)
+          o_senses  = LinkedData::Models::OntoLex::LexicalSense.count_in_submission(submission)
+          o_concepts= LinkedData::Models::OntoLex::LexicalConcept.count_in_submission(submission)
+          metrics.ontolexEntries = o_entries
+          metrics.ontolexForms   = o_forms
+          metrics.ontolexSenses  = o_senses
+          metrics.ontolexConcepts= o_concepts
+          logger.info("ontolex metrics finished")
+          logger.flush
+        rescue Exception => e
+          logger.error("Error computing OntoLex metrics: #{e}")
+          logger.flush
+        end
+
         # re-generate metrics file
         submission.generate_metrics_file(cls_metrics[:classes], indiv_count, prop_count, cls_metrics[:maxDepth])
         logger.info("generation of metrics file finished")
