@@ -7,7 +7,14 @@ module LinkedData
     def self.generate_links(object)
       current_cls = object.respond_to?(:klass) ? object.klass : object.class
       return {} if !current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) || current_cls.hypermedia_settings[:link_to].empty?
-      links = current_cls.hypermedia_settings[:link_to]
+      
+      # Check if object has custom link filtering method
+      links = if object.respond_to?(:hypermedia_links)
+        object.hypermedia_links
+      else
+        current_cls.hypermedia_settings[:link_to]
+      end
+      
       links_output = {}
       links.each do |link|
         expanded_link = expand_link(link, object)

@@ -148,10 +148,17 @@ module LinkedData
       end
 
       def self.get_object_submission(obj)
+        # For Ontology objects, use latest_submission (submission method requires an ID)
+        if obj.class.name == "LinkedData::Models::Ontology"
+          return obj.respond_to?(:latest_submission) ? obj.latest_submission : nil
+        end
         # Prefer direct submission accessor when present (works for read_only structs)
         return obj.submission if obj.respond_to?(:submission) && !obj.submission.nil?
         # Otherwise, check class attributes for Resource instances
         obj.class.respond_to?(:attributes) && obj.class.attributes.include?(:submission) ? obj.submission : nil
+      rescue ArgumentError
+        # Handle cases where submission() requires arguments
+        nil
       end
 
       def self.get_languages(submission, user_languages)

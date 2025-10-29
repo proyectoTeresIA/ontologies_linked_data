@@ -1,7 +1,7 @@
 module LinkedData
   module Models
     class OntologyFormat < LinkedData::Models::Base
-      VALUES = ["OBO", "OWL", "UMLS", "PROTEGE", "SKOS"]
+      VALUES = ["OBO", "OWL", "UMLS", "PROTEGE", "SKOS", "ONTOLEX"]
 
 
       model :ontology_format, name_with: :acronym
@@ -23,11 +23,16 @@ module LinkedData
         return id.to_s.end_with? "SKOS"
       end
 
+      def ontolex?
+        return id.to_s.end_with? "ONTOLEX"
+      end
+
       EXTENSIONS = {
         owl: ".owl",
         obo: ".obo",
         umls: ".ttl",
-        skos: ".skos"
+        skos: ".skos",
+        ontolex: ".json"
       }.freeze
       def file_extension
         self.bring(:acronym) if self.bring?(:acronym)
@@ -41,12 +46,20 @@ module LinkedData
         if skos?
           return RDF::SKOS[:broader]
         end
+        if ontolex?
+          # OntoLex doesn't use traditional tree navigation
+          return nil
+        end
         return RDF::RDFS[:subClassOf]
       end
 
       def class_type
         if skos?
           return RDF::SKOS[:Concept]
+        end
+        if ontolex?
+          # OntoLex uses LexicalConcept as the primary type
+          return Goo.vocabulary(:ontolex)[:LexicalConcept]
         end
         return RDF::OWL[:Class]
       end

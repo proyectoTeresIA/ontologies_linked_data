@@ -348,8 +348,20 @@ module LinkedData
 
       def generate_rdf(logger, reasoning: true)
         mime_type = nil
+        skip_triple_store_upload = false
 
-        if @submission.hasOntologyLanguage.umls?
+        if @submission.hasOntologyLanguage.ontolex?
+          logger.info("OntoLex JSON file detected; parsing with OntoLex parser")
+          logger.flush
+          
+          ontolex_parser = LinkedData::Parser::OntoLexParser.new(@submission, @submission.uploadFilePath)
+          ontolex_parser.logger = logger
+          triples_file_path = ontolex_parser.parse
+          
+          # OntoLex parser saves directly to triple store via Goo, skip file upload
+          skip_triple_store_upload = true
+          
+        elsif @submission.hasOntologyLanguage.umls?
           triples_file_path = @submission.triples_file_path
           logger.info("UMLS turtle file found; doing OWLAPI parse to extract metrics")
           logger.flush
@@ -388,11 +400,13 @@ module LinkedData
           # triples_file_path = output_rdf
         end
 
-        begin
-          delete_and_append(triples_file_path, logger, mime_type)
-        rescue => e
-          logger.error("Error sending data to triple store - #{e.response.code} #{e.class}: #{e.response.body}") if e.response&.body
-          raise e
+        unless skip_triple_store_upload
+          begin
+            delete_and_append(triples_file_path, logger, mime_type)
+          rescue => e
+            logger.error("Error sending data to triple store - #{e.response.code} #{e.class}: #{e.response.body}") if e.response&.body
+            raise e
+          end
         end
       end
 

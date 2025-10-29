@@ -18,243 +18,50 @@ module LinkedData
 
         link_to LinkedData::Hypermedia::Link.new("self", ->(s) { "ontologies/#{s.submission.ontology.acronym}/forms/#{CGI.escape(s.id.to_s)}" }, self.uri_type)
 
+        # Grant access to all users for OntoLex entities
+        grant_access_to_all true
+
         def properties
           self.unmapped
         end
 
-        # Ensure default attributes populate even for read_only instances
-        def ensure_computed
-          return if defined?(@_computed_populated) && @_computed_populated
-          data = computed
-          if data && data.is_a?(Hash)
-            self.writtenRep = Array(data[:writtenRep]) if data.key?(:writtenRep)
-            # do not set language at Form level
-            self.gender = data[:gender] if data.key?(:gender)
-            self.number = data[:number] if data.key?(:number)
-          end
-          @_computed_populated = true
-        end
-
-        def writtenRep
-          val = instance_variable_defined?(:@writtenRep) ? instance_variable_get(:@writtenRep) : nil
-          if val.nil? || (val.respond_to?(:empty?) && val.empty?)
-            ensure_computed
-            val = instance_variable_defined?(:@writtenRep) ? instance_variable_get(:@writtenRep) : val
-          end
-          return [] if val.nil?
-          val.is_a?(Array) ? val : [val]
-        end
-
-        def gender
-          val = instance_variable_defined?(:@gender) ? instance_variable_get(:@gender) : nil
-          if val.nil? || (val.respond_to?(:empty?) && val.empty?)
-            ensure_computed
-            val = instance_variable_defined?(:@gender) ? instance_variable_get(:@gender) : val
-          end
-          return [] if val.nil?
-          val.is_a?(Array) ? val : [val]
-        end
-
-        def number
-          val = instance_variable_defined?(:@number) ? instance_variable_get(:@number) : nil
-          if val.nil? || (val.respond_to?(:empty?) && val.empty?)
-            ensure_computed
-            val = instance_variable_defined?(:@number) ? instance_variable_get(:@number) : val
-          end
-          return [] if val.nil?
-          val.is_a?(Array) ? val : [val]
-        end
-
-        # Ensure computed fields are populated prior to serialization
         def to_hash(options = {})
-          begin
-            ensure_computed
-          rescue StandardError
-          end
-          h = super(options)
-          # Force-populate keys with computed getters to avoid empty arrays from Goo masking values
-          h["writtenRep"] = self.writtenRep if self.respond_to?(:writtenRep)
-          # We don't infer language on forms; include only if explicitly present
-          h["language"] = self.language if self.respond_to?(:language) && !self.language.nil?
-          h["gender"] = self.gender if self.respond_to?(:gender)
-          h["number"] = self.number if self.respond_to?(:number)
-          h
+          super(options)
         end
 
-        def computed
-          return {} unless self.submission && self.id
-          graph = self.submission.id
-          fid = self.id
-          wr_p = "http://www.w3.org/ns/lemon/ontolex#writtenRep"
-          wr_p_lemon = "http://lemon-model.net/lemon#writtenRep"
-          lang_p = "http://purl.org/dc/terms/language"
-          g_http = "http://www.lexinfo.net/ontology/3.0/lexinfo#gender"
-          g_https = "https://www.lexinfo.net/ontology/3.0/lexinfo#gender"
-          g_20 = "http://lexinfo.net/ontology/2.0/lexinfo#gender"
-          n_http = "http://www.lexinfo.net/ontology/3.0/lexinfo#number"
-          n_https = "https://www.lexinfo.net/ontology/3.0/lexinfo#number"
-          n_20 = "http://lexinfo.net/ontology/2.0/lexinfo#number"
-          qry = [
-            "SELECT ?p ?o WHERE {",
-            "  GRAPH <#{graph}> {",
-            "    VALUES ?s { <#{fid}> }",
-            "    ?s ?p ?o .",
-            "    FILTER(?p IN (<#{wr_p}>, <#{wr_p_lemon}>, <#{lang_p}>, <#{g_http}>, <#{g_https}>, <#{g_20}>, <#{n_http}>, <#{n_https}>, <#{n_20}>))",
-            "  }",
-            "}",
-          ].join("\n")
-          epr = Goo.sparql_query_client(:main)
-          result = {}
-          begin
-            epr.query(qry, graphs: [graph]).each do |row|
-              case row[:p].to_s
-              when wr_p, wr_p_lemon
-                (result[:writtenRep] ||= []) << row[:o].to_s
-              when lang_p
-                (result[:language] ||= []) << row[:o].to_s
-              when g_http, g_https, g_20
-                (result[:gender] ||= []) << row[:o].to_s
-              when n_http, n_https, n_20
-                (result[:number] ||= []) << row[:o].to_s
-              end
-            end
-          rescue StandardError
-          end
-          [:writtenRep, :gender, :number].each do |k|
-            result[k] = result[k].uniq if result[k].respond_to?(:uniq!)
-          end
-          result
-        end
-
-        # Build enriched read_only Forms for specific IRIs (parity with list endpoint)
-        def self.list_for_ids(submission, ids, _include_attrs = [])
+        def self.list_for_ids(submission, ids, include_attrs = [])
           return [] unless submission && ids && !ids.empty?
-          graph = submission.id
-          wr_p = "http://www.w3.org/ns/lemon/ontolex#writtenRep"
-          wr_p_lemon = "http://lemon-model.net/lemon#writtenRep"
-          lang_p = "http://purl.org/dc/terms/language"
-          g_http = "http://www.lexinfo.net/ontology/3.0/lexinfo#gender"
-          g_https = "https://www.lexinfo.net/ontology/3.0/lexinfo#gender"
-          g_20 = "http://lexinfo.net/ontology/2.0/lexinfo#gender"
-          n_http = "http://www.lexinfo.net/ontology/3.0/lexinfo#number"
-          n_https = "https://www.lexinfo.net/ontology/3.0/lexinfo#number"
-          n_20 = "http://lexinfo.net/ontology/2.0/lexinfo#number"
-          ids.map do |fid|
-            fid = fid.to_s
-            next nil if fid.empty?
-            qf = [
-              "SELECT ?p ?o WHERE {",
-              "  GRAPH <#{graph}> {",
-              "    VALUES ?s { <#{fid}> }",
-              "    ?s ?p ?o .",
-              "    FILTER(?p IN (<#{wr_p}>, <#{wr_p_lemon}>, <#{lang_p}>, <#{g_http}>, <#{g_https}>, <#{g_20}>, <#{n_http}>, <#{n_https}>, <#{n_20}>))",
-              "  }",
-              "}",
-            ].join("\n")
-            attrs = { id: RDF::URI(fid), submission: submission, writtenRep: [] }
+          
+          include_attrs = [:writtenRep, :language, :gender, :number] if include_attrs.empty?
+          
+          # Convert IDs to RDF::URI if needed, ensuring valid URIs
+          form_ids = ids.map do |id|
+            next id if id.is_a?(RDF::URI)
             begin
-              Goo.sparql_query_client(:main).query(qf, graphs: [graph]).each do |row|
-                case row[:p].to_s
-                when wr_p, wr_p_lemon
-                  (attrs[:writtenRep] ||= []) << row[:o].to_s
-                when lang_p
-                  # not exposing language by default
-                when g_http, g_https, g_20
-                  (attrs[:gender] ||= []) << row[:o].to_s
-                when n_http, n_https, n_20
-                  (attrs[:number] ||= []) << row[:o].to_s
-                end
-              end
-            rescue StandardError
+              uri_str = id.to_s.strip
+              # Ensure the URI is valid
+              next nil if uri_str.empty?
+              RDF::URI.new(uri_str)
+            rescue => e
+              puts "[Form] Failed to create RDF::URI from: #{id.inspect} - #{e.message}"
+              nil
             end
-            [:writtenRep, :gender, :number].each do |k|
-              arr = attrs[k]
-              attrs[k] = arr.uniq if arr.respond_to?(:uniq!)
-            end
-            LinkedData::Models::OntoLex::Form.read_only(attrs)
+          end.compact
+          return [] if form_ids.empty?
+          
+          # Query each ID individually and collect results
+          form_ids.map do |uri|
+            Form.find(uri).in(submission).include(*include_attrs).first
           end.compact
         end
 
-        def self.list_in_submission(submission, page, size, _include_attrs = [])
+        def self.list_in_submission(submission, page, size, include_attrs = [])
           return [] unless submission
-          graph = submission.id
-          offset = (page - 1) * size
-          type_uri = "http://www.w3.org/ns/lemon/ontolex#Form"
-          l_type_uri = "http://lemon-model.net/lemon#Form"
-          wr_p = "http://www.w3.org/ns/lemon/ontolex#writtenRep"
-          wr_p_lemon = "http://lemon-model.net/lemon#writtenRep"
           
-          # Simplified query - only select Form types
-          q = [
-            "SELECT DISTINCT ?f WHERE {",
-            "  GRAPH <#{graph}> {",
-            "    { ?f a <#{type_uri}> } UNION { ?f a <#{l_type_uri}> }",
-            "    FILTER(isIRI(?f))",
-            "  }",
-            "} ORDER BY ?f LIMIT #{size} OFFSET #{offset}",
-          ].join("\n")
+          # Now using standard Goo patterns with properly persisted data
+          include_attrs = [:writtenRep, :language, :gender, :number] if include_attrs.empty?
           
-          epr = Goo.sparql_query_client(:main)
-          rows = []
-          begin
-            rows = epr.query(q, graphs: [graph])
-          rescue StandardError
-            rows = []
-          end
-          return [] if rows.empty?
-          
-          # Batch query for all form properties
-          ids = rows.map { |row| row[:f].to_s }.select { |s| !s.empty? }
-          return [] if ids.empty?
-          
-          lang_p = "http://purl.org/dc/terms/language"
-          g_http = "http://www.lexinfo.net/ontology/3.0/lexinfo#gender"
-          g_https = "https://www.lexinfo.net/ontology/3.0/lexinfo#gender"
-          g_20 = "http://lexinfo.net/ontology/2.0/lexinfo#gender"
-          n_http = "http://www.lexinfo.net/ontology/3.0/lexinfo#number"
-          n_https = "https://www.lexinfo.net/ontology/3.0/lexinfo#number"
-          n_20 = "http://lexinfo.net/ontology/2.0/lexinfo#number"
-          
-          values = ids.map { |id| "<#{id}>" }.join(" ")
-          batch_q = [
-            "SELECT ?f ?p ?o WHERE {",
-            "  GRAPH <#{graph}> {",
-            "    VALUES ?f { #{values} }",
-            "    ?f ?p ?o .",
-            "    FILTER(?p IN (<#{wr_p}>, <#{wr_p_lemon}>, <#{lang_p}>, <#{g_http}>, <#{g_https}>, <#{g_20}>, <#{n_http}>, <#{n_https}>, <#{n_20}>))",
-            "  }",
-            "}",
-          ].join("\n")
-          
-          # Collect results by form ID
-          form_attrs = {}
-          ids.each { |id| form_attrs[id] = { id: RDF::URI(id), submission: submission, writtenRep: [] } }
-          
-          begin
-            epr.query(batch_q, graphs: [graph]).each do |row|
-              fid = row[:f].to_s
-              next unless form_attrs[fid]
-              
-              case row[:p].to_s
-              when wr_p, wr_p_lemon
-                form_attrs[fid][:writtenRep] << row[:o].to_s
-              when g_http, g_https, g_20
-                (form_attrs[fid][:gender] ||= []) << row[:o].to_s
-              when n_http, n_https, n_20
-                (form_attrs[fid][:number] ||= []) << row[:o].to_s
-              end
-            end
-          rescue StandardError
-          end
-          
-          # Dedup and create read_only objects
-          form_attrs.values.map do |attrs|
-            [:writtenRep, :gender, :number].each do |k|
-              arr = attrs[k]
-              attrs[k] = arr.uniq if arr.respond_to?(:uniq)
-            end
-            LinkedData::Models::OntoLex::Form.read_only(attrs)
-          end
+          Form.in(submission).include(*include_attrs).page(page, size).all
         end
 
         def self.count_in_submission(submission)

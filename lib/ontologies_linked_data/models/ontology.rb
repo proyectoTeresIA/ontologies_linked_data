@@ -431,6 +431,36 @@ module LinkedData
         !self.viewingRestriction.eql?("public")
       end
 
+      def ontolex?
+        latest = latest_submission(status: :any)
+        return false unless latest
+        latest.bring(:hasOntologyLanguage) if latest.bring?(:hasOntologyLanguage)
+        latest.hasOntologyLanguage && latest.hasOntologyLanguage.ontolex?
+      end
+
+      # Override hypermedia link generation to provide format-specific links
+      def hypermedia_links
+        # Get the class-level links
+        links = self.class.hypermedia_settings[:link_to].dup
+        
+        # If this is an OntoLex ontology, filter out class/property links and add OntoLex-specific ones
+        if ontolex?
+          # Remove OWL-specific links
+          links.reject! { |link| ["properties", "classes", "single_class", "roots", "instances"].include?(link.type.to_s) }
+          
+          # Add OntoLex-specific links
+          ontolex_links = [
+            LinkedData::Hypermedia::Link.new("lexical_concepts", lambda {|s| "ontologies/#{s.acronym}/lexical_concepts"}, LinkedData::Models::OntoLex::LexicalConcept.uri_type),
+            LinkedData::Hypermedia::Link.new("lexical_entries", lambda {|s| "ontologies/#{s.acronym}/lexical_entries"}, LinkedData::Models::OntoLex::LexicalEntry.uri_type),
+            LinkedData::Hypermedia::Link.new("lexical_senses", lambda {|s| "ontologies/#{s.acronym}/lexical_senses"}, LinkedData::Models::OntoLex::LexicalSense.uri_type),
+            LinkedData::Hypermedia::Link.new("forms", lambda {|s| "ontologies/#{s.acronym}/forms"}, LinkedData::Models::OntoLex::Form.uri_type)
+          ]
+          links.concat(ontolex_links)
+        end
+        
+        links
+      end
+
       def accessible?(user)
         return true if user.admin?
         bring(:acl) if bring?(:acl)
