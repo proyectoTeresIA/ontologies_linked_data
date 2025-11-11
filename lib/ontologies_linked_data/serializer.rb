@@ -87,19 +87,10 @@ module LinkedData
       
       lang = self.get_language(params)
 
-      # Backwards-compat support for 'display' while being robust to empty values
-      raw_only = params['display']
-      only = []
-      if raw_only
-        if raw_only.is_a?(Array)
-          only = raw_only
-        elsif raw_only.is_a?(String)
-          # Split, strip, and drop empty tokens so that 'display=' doesn't hide everything
-          only = raw_only.split(',').map { |t| t.strip }.reject { |t| t.empty? }
-        end
-      end
-      all = (!only.empty? && only.first == 'all')
-      only = [] if all
+      only = params['display'] || []
+      only = only.split(',') unless only.is_a?(Array)
+      all = only[0] == 'all'
+      only = all ? [] : only
 
       options = { only: only, lang: lang, all: all, params: params, request: request } 
       LinkedData::Serializers.serialize(obj, type, options)

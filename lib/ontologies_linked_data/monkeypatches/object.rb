@@ -241,6 +241,7 @@ class Object
     if current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) && all && !options[:nested]
       # For top-level API resources with display=all, serialize ALL declared attributes
       attributes = current_cls.attributes
+      hash = populate_hash_from_list(hash, attributes)
     elsif !current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) || current_cls.hypermedia_settings[:serialize_default].empty?
       attributes = self.is_a?(Struct) ? self.members : self.instance_variables.map {|e| e.to_s.delete("@").to_sym }
 

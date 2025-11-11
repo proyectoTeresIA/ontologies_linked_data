@@ -63,7 +63,8 @@ module LinkedData
       attribute :ancestors, namespace: :rdfs,
                 property: :subClassOf,
                 enforce: [:list, :class],
-                transitive: true
+                transitive: true,
+                range: -> { LinkedData::Models::Class }
 
       attribute :children, namespace: :rdfs,
                   property: lambda {|x| self.tree_view_property(x) },
@@ -72,10 +73,12 @@ module LinkedData
       attribute :subClassOf, namespace: :rdfs,
                 enforce: [:list, :uri]
 
-      attribute :ancestors, namespace: :rdfs, property: :subClassOf, handler: :retrieve_ancestors
+      attribute :ancestors, namespace: :rdfs, property: :subClassOf, handler: :retrieve_ancestors,
+            range: -> { LinkedData::Models::Class }
 
       attribute :descendants, namespace: :rdfs, property: :subClassOf,
-                handler: :retrieve_descendants
+                handler: :retrieve_descendants,
+                range: -> { LinkedData::Models::Class }
 
       attribute :semanticType, enforce: [:list], :namespace => :umls, :property => :hasSTY
       attribute :cui, enforce: [:list], :namespace => :umls, alias: true

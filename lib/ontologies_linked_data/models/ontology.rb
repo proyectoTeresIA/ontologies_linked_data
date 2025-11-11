@@ -39,12 +39,12 @@ module LinkedData
       attribute :subscriptions,
                   inverse: { on: :subscription, attribute: :ontology}
       attribute :administeredBy, enforce: [:existence, :user, :list]
-      attribute :group, enforce: [:list, :group]
+      attribute :group, enforce: [:list, :group], default: lambda { |record| [] }
 
       attribute :viewingRestriction, :default => lambda {|x| "public"}
       attribute :doNotUpdate, enforce: [:boolean]
       attribute :flat, enforce: [:boolean]
-      attribute :hasDomain, namespace: :omv, enforce: [:list, :category]
+      attribute :hasDomain, namespace: :omv, enforce: [:list, :category], default: lambda { |record| [] }
       attribute :summaryOnly, enforce: [:boolean]
 
       attribute :acl, enforce: [:list, :user]
@@ -54,7 +54,7 @@ module LinkedData
       attribute :ontologyType, enforce: [:ontology_type], default: lambda { |record| LinkedData::Models::OntologyType.find("ONTOLOGY").include(:code).first }
 
       # Hypermedia settings
-      serialize_default :administeredBy, :acronym, :name, :summaryOnly, :flat, :ontologyType
+      serialize_default :administeredBy, :acronym, :name, :summaryOnly, :flat, :ontologyType, :hasDomain, :group
       links_load :acronym
       link_to LinkedData::Hypermedia::Link.new("submissions", lambda {|s| "ontologies/#{s.acronym}/submissions"}, LinkedData::Models::OntologySubmission.uri_type),
               LinkedData::Hypermedia::Link.new("properties", lambda {|s| "ontologies/#{s.acronym}/properties"}, "#{Goo.namespaces[:metadata].to_s}Property"),
