@@ -172,22 +172,10 @@ module LinkedData
         # Class-level helpers
         def self.count_in_submission(submission)
           return 0 unless submission
-          # Custom count needed to support both ontolex: and lemon: namespaces
-          graph = submission.id
-          ontolex = "http://www.w3.org/ns/lemon/ontolex#"
-          lemon = "http://lemon-model.net/lemon#"
-          epr = Goo.sparql_query_client(:main)
           begin
-            q = [
-              "SELECT (COUNT(DISTINCT ?s) AS ?count) WHERE {",
-              "  GRAPH <#{graph}> {",
-              "    { ?s a <#{ontolex}LexicalEntry> } UNION { ?s a <#{lemon}LexicalEntry> }",
-              "  }",
-              "}",
-            ].join("\n")
-            row = epr.query(q, graphs: [graph]).first
-            (row && row[:count]) ? row[:count].to_s.to_i : 0
-          rescue StandardError
+            LexicalEntry.in(submission).count
+          rescue StandardError => e
+            puts "[LexicalEntry] Error counting: #{e.message}"
             0
           end
         end

@@ -66,32 +66,10 @@ module LinkedData
 
         def self.count_in_submission(submission)
           return 0 unless submission
-          graph = submission.id
-          entry_type = "http://www.w3.org/ns/lemon/ontolex#LexicalEntry"
-          form_p = "http://www.w3.org/ns/lemon/ontolex#form"
-          lex_form_p = "http://www.w3.org/ns/lemon/ontolex#lexicalForm"
-          can_p = "http://www.w3.org/ns/lemon/ontolex#canonicalForm"
-          oth_p = "http://www.w3.org/ns/lemon/ontolex#otherForm"
-          l_form_p = "http://lemon-model.net/lemon#form"
-          l_can_p = "http://lemon-model.net/lemon#canonicalForm"
-          l_oth_p = "http://lemon-model.net/lemon#otherForm"
-          type_uri = "http://www.w3.org/ns/lemon/ontolex#Form"
-          l_type_uri = "http://lemon-model.net/lemon#Form"
-          epr = Goo.sparql_query_client(:main)
           begin
-            q = [
-              "SELECT (COUNT(DISTINCT ?f) AS ?count) WHERE {",
-              "  GRAPH <#{graph}> {",
-              "    { ?e a <#{entry_type}> . ?e (<#{form_p}>|<#{lex_form_p}>|<#{can_p}>|<#{oth_p}>|<#{l_form_p}>|<#{l_can_p}>|<#{l_oth_p}>) ?f }",
-              "    UNION { ?f a <#{type_uri}> }",
-              "    UNION { ?f a <#{l_type_uri}> }",
-              "    FILTER(isIRI(?f))",
-              "  }",
-              "}",
-            ].join("\n")
-            row = epr.query(q, graphs: [graph]).first
-            (row && row[:count]) ? row[:count].to_s.to_i : 0
-          rescue StandardError
+            Form.in(submission).count
+          rescue StandardError => e
+            puts "[Form] Error counting: #{e.message}"
             0
           end
         end

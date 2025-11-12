@@ -82,78 +82,12 @@ module LinkedData
 
         def self.count_in_submission(submission)
           return 0 unless submission
-          # WORKAROUND: Count without GRAPH filter because concepts are in malformed graph
-          ontolex_type = "http://www.w3.org/ns/lemon/ontolex#LexicalConcept"
-          skos_type_http = "http://www.w3.org/2004/02/skos/core#Concept"
-          skos_type_https = "https://www.w3.org/2004/02/skos/core#Concept"
-          lc_inv_p = "http://www.w3.org/ns/lemon/ontolex#isLexicalizedSenseOf"
-          evokes_p = "http://www.w3.org/ns/lemon/ontolex#evokes"
-          skos_pref_http = "http://www.w3.org/2004/02/skos/core#prefLabel"
-          skos_pref_https = "https://www.w3.org/2004/02/skos/core#prefLabel"
-          rdfs_label = "http://www.w3.org/2000/01/rdf-schema#label"
-          dct_title = "http://purl.org/dc/terms/title"
-          epr = Goo.sparql_query_client(:main)
           begin
-            q = [
-              "SELECT (COUNT(DISTINCT ?c) AS ?count) WHERE {",
-              "  GRAPH ?g {",  # Changed from GRAPH <#{graph}> to GRAPH ?g
-              "    { ?c a <#{ontolex_type}> }",
-              "    UNION { ?c a <#{skos_type_http}> }",
-              "    UNION { ?c a <#{skos_type_https}> }",
-              "    UNION { ?s <#{lc_inv_p}> ?c }",
-              "    UNION { ?e <#{evokes_p}> ?c }",
-              "    UNION { ?c <#{skos_pref_http}> ?l }",
-              "    UNION { ?c <#{skos_pref_https}> ?l }",
-              "    UNION { ?c <#{rdfs_label}> ?l }",
-              "    UNION { ?c <#{dct_title}> ?l }",
-              "    FILTER(isIRI(?c))",
-              "  }",
-              "}",
-            ].join("\n")
-            row = epr.query(q).first  # Removed graphs: [graph] parameter
-            (row && row[:count]) ? row[:count].to_s.to_i : 0
-          rescue StandardError
+            LexicalConcept.in(submission).count
+          rescue StandardError => e
+            puts "[LexicalConcept] Error counting: #{e.message}"
             0
           end
-        end
-
-        def self.list_ids_basic(submission, page, size)
-          return [] unless submission
-          graph = submission.id
-          offset = (page - 1) * size
-          ontolex_type = "http://www.w3.org/ns/lemon/ontolex#LexicalConcept"
-          skos_type_http = "http://www.w3.org/2004/02/skos/core#Concept"
-          skos_type_https = "https://www.w3.org/2004/02/skos/core#Concept"
-          lc_inv_p = "http://www.w3.org/ns/lemon/ontolex#isLexicalizedSenseOf"
-          evokes_p = "http://www.w3.org/ns/lemon/ontolex#evokes"
-          skos_pref_http = "http://www.w3.org/2004/02/skos/core#prefLabel"
-          skos_pref_https = "https://www.w3.org/2004/02/skos/core#prefLabel"
-          rdfs_label = "http://www.w3.org/2000/01/rdf-schema#label"
-          dct_title = "http://purl.org/dc/terms/title"
-          q = [
-            "SELECT DISTINCT ?c WHERE {",
-            "  GRAPH <#{graph}> {",
-            "    { ?c a <#{ontolex_type}> }",
-            "    UNION { ?c a <#{skos_type_http}> }",
-            "    UNION { ?c a <#{skos_type_https}> }",
-            "    UNION { ?s <#{lc_inv_p}> ?c }",
-            "    UNION { ?e <#{evokes_p}> ?c }",
-            "    UNION { ?c <#{skos_pref_http}> ?l }",
-            "    UNION { ?c <#{skos_pref_https}> ?l }",
-            "    UNION { ?c <#{rdfs_label}> ?l }",
-            "    UNION { ?c <#{dct_title}> ?l }",
-            "    FILTER(isIRI(?c))",
-            "  }",
-            "} ORDER BY ?c LIMIT #{size} OFFSET #{offset}",
-          ].join("\n")
-          epr = Goo.sparql_query_client(:main)
-          rows = []
-          begin
-            rows = epr.query(q, graphs: [graph])
-          rescue StandardError
-            rows = []
-          end
-          rows.map { |r| r[:c].to_s }.select { |s| !s.empty? }
         end
 
         # Helper class method to expand definition and subject attributes for a concept
