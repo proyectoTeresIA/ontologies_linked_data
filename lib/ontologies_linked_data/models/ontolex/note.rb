@@ -1,17 +1,18 @@
 module LinkedData
   module Models
     module OntoLex
-      class Definition < LinkedData::Models::Base
-        model :definition, name_with: :id, collection: :submission,
-                           namespace: :termlex, schemaless: :true,
-                           rdf_type: ->(*_x) { Goo.vocabulary(:termlex)['Definition'] }
+      class Note < LinkedData::Models::Base
+        model :note, name_with: :id, collection: :submission,
+                     namespace: :termlex, schemaless: :true,
+                     rdf_type: ->(*_x) { Goo.vocabulary(:termlex)['Note'] }
 
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
+        attribute :label, namespace: :rdfs
         attribute :language, namespace: :dcterms
         attribute :value, namespace: :rdf, property: :value
-        attribute :wasDerivedFrom, namespace: :prov, enforce: [:list]
+        attribute :wasDerivedFrom, namespace: :prov, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Reference }
 
-        serialize_default :language, :value, :wasDerivedFrom
+        serialize_default :label, :language, :value, :wasDerivedFrom
         serialize_never :submission
 
         # Grant access to all users for OntoLex entities

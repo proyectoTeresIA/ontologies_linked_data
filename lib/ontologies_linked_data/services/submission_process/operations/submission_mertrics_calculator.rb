@@ -5,7 +5,7 @@ module LinkedData
         process_metrics(logger)
       end
 
-      def generate_umls_metrics_file(tr_file_path=nil)
+      def generate_umls_metrics_file(tr_file_path = nil)
         tr_file_path ||= @submission.triples_file_path
         class_count = 0
         indiv_count = 0
@@ -26,7 +26,7 @@ module LinkedData
         metrics_from_owlapi = @submission.metrics_from_file
         max_depth = metrics_from_owlapi[1][3] unless metrics_from_owlapi.empty?
 
-        generate_metrics_file(class_count, indiv_count, prop_count, max_depth)
+        generate_metrics_file(class_count, indiv_count, prop_count, max_depth, 0, 0, 0, 0)
       end
 
       private
@@ -66,7 +66,7 @@ module LinkedData
           logger.flush
           metrics = LinkedData::Models::Metric.new
 
-          cls_metrics.each do |k,v|
+          cls_metrics.each do |k, v|
             unless v.instance_of?(Integer)
               begin
                 v = Integer(v)
@@ -76,7 +76,7 @@ module LinkedData
                 v = 0
               end
             end
-            metrics.send("#{k}=",v)
+            metrics.send("#{k}=", v)
           end
           indiv_count = LinkedData::Metrics.number_individuals(logger, @submission)
           metrics.individuals = indiv_count
@@ -86,8 +86,31 @@ module LinkedData
           metrics.properties = prop_count
           logger.info('properties finished')
           logger.flush
+
+          # OntoLex counts
+          ontolex_entries = 0
+          ontolex_forms = 0
+          ontolex_senses = 0
+          ontolex_concepts = 0
+          begin
+            ontolex_entries = LinkedData::Models::OntoLex::LexicalEntry.count_in_submission(@submission)
+            ontolex_forms   = LinkedData::Models::OntoLex::Form.count_in_submission(@submission)
+            ontolex_senses  = LinkedData::Models::OntoLex::LexicalSense.count_in_submission(@submission)
+            ontolex_concepts = LinkedData::Models::OntoLex::LexicalConcept.count_in_submission(@submission)
+            metrics.ontolexEntries = ontolex_entries
+            metrics.ontolexForms   = ontolex_forms
+            metrics.ontolexSenses  = ontolex_senses
+            metrics.ontolexConcepts = ontolex_concepts
+            logger.info('ontolex metrics finished')
+            logger.flush
+          rescue StandardError => e
+            logger.error("Error computing OntoLex metrics: #{e.message}")
+            logger.flush
+          end
+
           # re-generate metrics file
-          generate_metrics_file(cls_metrics[:classes], indiv_count, prop_count, cls_metrics[:maxDepth])
+          generate_metrics_file(cls_metrics[:classes], indiv_count, prop_count, cls_metrics[:maxDepth],
+                                ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts)
           logger.info('generation of metrics file finished')
           logger.flush
         rescue StandardError => e
@@ -99,13 +122,15 @@ module LinkedData
         metrics
       end
 
-      def generate_metrics_file(class_count, indiv_count, prop_count, max_depth)
+      def generate_metrics_file(class_count, indiv_count, prop_count, max_depth,
+                                ontolex_entries = 0, ontolex_forms = 0, ontolex_senses = 0, ontolex_concepts = 0)
         CSV.open(@submission.metrics_path, 'wb') do |csv|
-          csv << ['Class Count', 'Individual Count', 'Property Count', 'Max Depth']
-          csv << [class_count, indiv_count, prop_count, max_depth]
+          csv << ['Class Count', 'Individual Count', 'Property Count', 'Max Depth',
+                  'OntoLex Entries', 'OntoLex Forms', 'OntoLex Senses', 'OntoLex Concepts']
+          csv << [class_count, indiv_count, prop_count, max_depth,
+                  ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts]
         end
       end
-
     end
   end
 end

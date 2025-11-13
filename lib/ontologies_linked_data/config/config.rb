@@ -203,7 +203,13 @@ module LinkedData
       conf.add_namespace(:vartrans, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/vartrans#'))
       conf.add_namespace(:lexicog, RDF::Vocabulary.new('http://www.w3.org/ns/lemon/lexicog#'))
       # TermLex (TERMINOLOGY) proposal namespace used in docs; may not exist in all datasets
-      conf.add_namespace(:termlex, RDF::Vocabulary.new('http://purl.org/termlex#'))
+      conf.add_namespace(:termlex, RDF::Vocabulary.new('https://termlex.oeg.fi.upm.es/termlex/'))
+      # Additional namespaces for OntoLex extensions
+      conf.add_namespace(:etv, RDF::Vocabulary.new('https://w3id.org/def/easytv#'))
+      conf.add_namespace(:dbo, RDF::Vocabulary.new('http://dbpedia.org/ontology/'))
+      conf.add_namespace(:olia, RDF::Vocabulary.new('http://purl.org/olia/olia.owl#'))
+      conf.add_namespace(:rico, RDF::Vocabulary.new('https://www.ica.org/standards/RiC/ontology#'))
+      conf.add_namespace(:dul, RDF::Vocabulary.new('http://www.ontologydesignpatterns.org/ont/dul/DUL.owl#'))
 
       conf.id_prefix = ENV.fetch('REST_URL_PREFIX', 'http://data.bioontology.org/')
       conf.pluralize_models(true)

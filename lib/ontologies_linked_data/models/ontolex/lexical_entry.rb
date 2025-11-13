@@ -4,7 +4,7 @@ module LinkedData
       class LexicalEntry < LinkedData::Models::Base
         model :lexical_entry, name_with: :id, collection: :submission,
                               namespace: :ontolex, schemaless: :true,
-                              rdf_type: ->(*_x) { RDF::URI("http://www.w3.org/ns/lemon/ontolex#LexicalEntry") }
+                              rdf_type: ->(*_x) { Goo.vocabulary(:ontolex)['LexicalEntry'] }
 
         attribute :lemma, namespace: :ontolex
         attribute :language, namespace: :dcterms
@@ -16,32 +16,46 @@ module LinkedData
         attribute :otherForm, namespace: :ontolex, enforce: [:list]
         attribute :sense, namespace: :ontolex, enforce: [:list]
         attribute :evokes, namespace: :ontolex, property: :evokes
+        # New properties from modelado.md
+        attribute :casNumber, namespace: :dbo
+        attribute :code, namespace: :dbo
+        attribute :hasValency, namespace: :olia, enforce: [:list]
+        attribute :signedForm, namespace: :etv, enforce: [:list], range: -> { LinkedData::Models::OntoLex::SignedForm }
+        attribute :wasDerivedFrom, namespace: :prov, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Reference }
+        attribute :wasInfluencedBy, namespace: :prov, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Activity }
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
 
         # Hypermedia / serialization
-        serialize_default :lemma, :language, :partOfSpeech, :termType, :form, :sense, :evokes
+        serialize_default :lemma, :language, :partOfSpeech, :termType, :form, :sense, :evokes, :casNumber, :code,
+                          :hasValency, :signedForm, :wasDerivedFrom, :wasInfluencedBy
         serialize_never :submission
         serialize_methods :properties
         links_load submission: [ontology: [:acronym]]
-        link_to LinkedData::Hypermedia::Link.new("self", ->(s) { "ontologies/#{s.submission.ontology.acronym}/lexical_entries/#{CGI.escape(s.id.to_s)}" }, self.uri_type),
-                LinkedData::Hypermedia::Link.new("ontology", ->(s) { "ontologies/#{s.submission.ontology.acronym}" }, Goo.vocabulary["Ontology"])
+        link_to LinkedData::Hypermedia::Link.new('self', lambda { |s|
+          "ontologies/#{s.submission.ontology.acronym}/lexical_entries/#{CGI.escape(s.id.to_s)}"
+        }, uri_type),
+                LinkedData::Hypermedia::Link.new('ontology', lambda { |s|
+                  "ontologies/#{s.submission.ontology.acronym}"
+                }, Goo.vocabulary['Ontology'])
 
         # Grant access to all users for OntoLex entities
         grant_access_to_all true
 
         def properties
-          self.unmapped
+          unmapped
         end
 
         # Build a stable per-submission Solr id similar to Class/Property
         def index_id
-          self.bring(:submission) if self.bring?(:submission)
-          return nil unless self.submission
-          self.submission.bring(:submissionId) if self.submission.bring?(:submissionId)
-          self.submission.bring(:ontology) if self.submission.bring?(:ontology)
-          return nil unless self.submission.ontology
-          self.submission.ontology.bring(:acronym) if self.submission.ontology.bring?(:acronym)
-          "#{self.id.to_s}_#{self.submission.ontology.acronym}_#{self.submission.submissionId}"
+          bring(:submission) if bring?(:submission)
+          return nil unless submission
+
+          submission.bring(:submissionId) if submission.bring?(:submissionId)
+          submission.bring(:ontology) if submission.bring?(:ontology)
+          return nil unless submission.ontology
+
+          submission.ontology.bring(:acronym) if submission.ontology.bring?(:acronym)
+          "#{id}_#{submission.ontology.acronym}_#{submission.submissionId}"
         end
 
         # Compute Solr document for lexical entries
@@ -49,22 +63,23 @@ module LinkedData
           doc = {}
           # Required fields: stable unique id for this submission and original resource IRI
           # Use a stable per-submission unique id for the Solr document, similar to classes/properties
-          doc[:id] = self.index_id || self.id.to_s
-          doc[:resource_id] = self.id.to_s
-          self.bring(:submission) if self.bring?(:submission)
-          return doc unless self.submission
+          doc[:id] = index_id || id.to_s
+          doc[:resource_id] = id.to_s
+          bring(:submission) if bring?(:submission)
+          return doc unless submission
 
           # Submission/ontology fields
-          doc[:ontologyId] = self.submission.id.to_s
-          doc[:submissionAcronym] = self.submission.ontology.acronym
-          doc[:submissionId] = self.submission.submissionId
+          doc[:ontologyId] = submission.id.to_s
+          doc[:submissionAcronym] = submission.ontology.acronym
+          doc[:submissionId] = submission.submissionId
 
           # Core lexical fields (lemma/writtenRep/language/pos/type)
-          all_attrs = self.to_hash(include_languages: true)
+          all_attrs = to_hash(include_languages: true)
 
-          [:lemma, :language, :partOfSpeech, :termType].each do |att|
+          %i[lemma language partOfSpeech termType].each do |att|
             val = all_attrs[att]
             next if val.nil? || (val.respond_to?(:empty?) && val.empty?)
+
             if val.is_a?(Hash)
               # language-tagged hash → index all variants and per-language dynamic
               doc[att] = val.values.flatten
@@ -75,33 +90,29 @@ module LinkedData
           end
 
           # Forms: flatten writtenRep from embedded forms if present
-          if self.form
+          if form
             reps = []
-            Array(self.form).each do |f|
-              if f.respond_to?(:writtenRep) && f.writtenRep
-                reps.concat(Array(f.writtenRep))
-              end
+            Array(form).each do |f|
+              reps.concat(Array(f.writtenRep)) if f.respond_to?(:writtenRep) && f.writtenRep
             end
             reps.uniq!
             doc[:writtenRep] = reps unless reps.empty?
           end
 
           # Senses: definitions/examples and concept labels
-          if self.sense
+          if sense
             defs = []
             exs = []
             concepts = []
             concept_labels = []
-            Array(self.sense).each do |s|
+            Array(sense).each do |s|
               defs.concat(Array(s.definition)) if s.respond_to?(:definition) && s.definition
               exs.concat(Array(s.example)) if s.respond_to?(:example) && s.example
-              if s.respond_to?(:lexicalConcept) && s.lexicalConcept
-                Array(s.lexicalConcept).each do |lc|
-                  concepts << lc.id.to_s
-                  if lc.respond_to?(:prefLabel) && lc.prefLabel
-                    concept_labels.concat(Array(lc.prefLabel))
-                  end
-                end
+              next unless s.respond_to?(:lexicalConcept) && s.lexicalConcept
+
+              Array(s.lexicalConcept).each do |lc|
+                concepts << lc.id.to_s
+                concept_labels.concat(Array(lc.prefLabel)) if lc.respond_to?(:prefLabel) && lc.prefLabel
               end
             end
             doc[:definition] = defs unless defs.empty?
@@ -112,10 +123,8 @@ module LinkedData
 
           # Concepts directly evoked by the entry (ensure they are indexed even without senses)
           begin
-            evoked_ids = self.respond_to?(:evokes_ids) ? Array(self.evokes_ids) : []
-            unless evoked_ids.empty?
-              doc[:concept] = (Array(doc[:concept]) + evoked_ids).uniq
-            end
+            evoked_ids = respond_to?(:evokes_ids) ? Array(evokes_ids) : []
+            doc[:concept] = (Array(doc[:concept]) + evoked_ids).uniq unless evoked_ids.empty?
           rescue StandardError
           end
 
@@ -130,7 +139,7 @@ module LinkedData
         end
 
         def properties_for_indexing
-          self_props = self.properties
+          self_props = properties
           return nil if self_props.nil?
 
           props = {}
@@ -139,14 +148,16 @@ module LinkedData
             if attr_val.is_a?(Array)
               props[attr_key] = []
               attr_val.uniq.each do |val|
-                real = val.kind_of?(Goo::Base::Resource) ? val.id.to_s : val.to_s.strip
+                real = val.is_a?(Goo::Base::Resource) ? val.id.to_s : val.to_s.strip
                 next if real.respond_to?(:empty?) && real.empty?
+
                 prop_vals << real
                 props[attr_key] << real
               end
             else
               real = attr_val.to_s.strip
               next if real.respond_to?(:empty?) && real.empty?
+
               prop_vals << real
               props[attr_key] = real
             end
@@ -172,6 +183,7 @@ module LinkedData
         # Class-level helpers
         def self.count_in_submission(submission)
           return 0 unless submission
+
           begin
             LexicalEntry.in(submission).count
           rescue StandardError => e
@@ -182,36 +194,81 @@ module LinkedData
 
         def self.list_in_submission(submission, page, size, include_attrs = [])
           return [] unless submission
-          include_attrs = [:lemma, :language, :partOfSpeech, :form, :sense, :evokes] if include_attrs.empty?
-          LexicalEntry.in(submission).include(*include_attrs).page(page, size).all
+
+          include_attrs = %i[lemma language partOfSpeech form sense evokes signedForm wasDerivedFrom wasInfluencedBy] if include_attrs.empty?
+          entries = LexicalEntry.in(submission).include(*include_attrs).page(page, size).all
+          
+          # Expand provenance attributes
+          entries.each { |e| expand_entry_attributes(e, submission) }
+          entries
         end
 
         # Build enriched read_only entries for specific IRIs (parity with list endpoint)
         def self.list_for_ids(submission, ids, include_attrs = [])
           return [] unless submission && ids && !ids.empty?
-          
-          include_attrs = [:lemma, :language, :partOfSpeech, :form, :sense, :evokes] if include_attrs.empty?
-          
+
+          include_attrs = %i[lemma language partOfSpeech form sense evokes signedForm wasDerivedFrom wasInfluencedBy] if include_attrs.empty?
+
           # Convert IDs to RDF::URI if needed, ensuring valid URIs
           entry_ids = ids.map do |id|
             next id if id.is_a?(RDF::URI)
+
             begin
               uri_str = id.to_s.strip
               # Ensure the URI is valid
               next nil if uri_str.empty?
+
               RDF::URI.new(uri_str)
-            rescue => e
+            rescue StandardError => e
               puts "[LexicalEntry] Failed to create RDF::URI from: #{id.inspect} - #{e.message}"
               nil
             end
           end.compact
-          
+
           return [] if entry_ids.empty?
-          
+
           # Query each ID individually and collect results
-          entry_ids.map do |uri|
+          entries = entry_ids.map do |uri|
             LexicalEntry.find(uri).in(submission).include(*include_attrs).first
           end.compact
+          
+          # Expand provenance attributes
+          entries.each { |e| expand_entry_attributes(e, submission) }
+          entries
+        end
+
+        # Expand provenance attributes for an entry
+        def self.expand_entry_attributes(entry, submission)
+          return unless entry
+
+          # Expand wasDerivedFrom (References)
+          if entry.wasDerivedFrom
+            entry.wasDerivedFrom = Array(entry.wasDerivedFrom).map do |ref|
+              LinkedData::Models::OntoLex::LexicalConcept.expand_reference(ref, submission)
+            end.compact
+          end
+
+          # Expand wasInfluencedBy (Activities)
+          if entry.wasInfluencedBy
+            entry.wasInfluencedBy = Array(entry.wasInfluencedBy).map do |activity|
+              LinkedData::Models::OntoLex::LexicalConcept.expand_activity(activity, submission)
+            end.compact
+          end
+
+          # Expand signedForm (SignedForm with Video)
+          if entry.signedForm
+            entry.signedForm = Array(entry.signedForm).map do |sf|
+              result = LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(sf, submission, 'SignedForm', %w[signedRep])
+              # Expand nested video
+              if result.is_a?(Hash) && result['signedRep']
+                videos = Array(result['signedRep']).map do |vid|
+                  LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(vid, submission, 'Video', %w[url])
+                end
+                result['signedRep'] = videos.size == 1 ? videos.first : videos
+              end
+              result
+            end.compact
+          end
         end
       end
     end
