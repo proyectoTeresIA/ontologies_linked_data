@@ -21,13 +21,33 @@ module LinkedData
         attribute :code, namespace: :dbo
         attribute :hasValency, namespace: :olia, enforce: [:list]
         attribute :signedForm, namespace: :etv, enforce: [:list], range: -> { LinkedData::Models::OntoLex::SignedForm }
-        attribute :wasDerivedFrom, namespace: :prov, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Reference }
-        attribute :wasInfluencedBy, namespace: :prov, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Activity }
+        attribute :wasDerivedFrom, namespace: :prov, enforce: [:list], range: lambda {
+          LinkedData::Models::OntoLex::Reference
+        }
+        attribute :wasInfluencedBy, namespace: :prov, enforce: [:list], range: lambda {
+          LinkedData::Models::OntoLex::Activity
+        }
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
+
+        # Virtual attributes from Solr (not in RDF, but useful for search results)
+        # Custom getters and setters that support Goo's on_load parameter
+        attr_reader :subject, :subjectLabel, :writtenRep
+
+        def subject=(value, _options = {})
+          @subject = value
+        end
+
+        def subjectLabel=(value, _options = {})
+          @subjectLabel = value
+        end
+
+        def writtenRep=(value, _options = {})
+          @writtenRep = value
+        end
 
         # Hypermedia / serialization
         serialize_default :lemma, :language, :partOfSpeech, :termType, :form, :sense, :evokes, :casNumber, :code,
-                          :hasValency, :signedForm, :wasDerivedFrom, :wasInfluencedBy
+                          :hasValency, :signedForm, :wasDerivedFrom, :wasInfluencedBy, :subject, :subjectLabel, :writtenRep
         serialize_never :submission
         serialize_methods :properties
         links_load submission: [ontology: [:acronym]]
@@ -74,7 +94,7 @@ module LinkedData
           doc[:submissionId] = submission.submissionId
 
           # Core lexical fields (lemma/writtenRep/language/pos/type)
-          all_attrs = to_hash(include_languages: true)
+          all_attrs = to_hash
 
           %i[lemma language partOfSpeech termType].each do |att|
             val = all_attrs[att]
@@ -99,12 +119,15 @@ module LinkedData
             doc[:writtenRep] = reps unless reps.empty?
           end
 
-          # Senses: definitions/examples and concept labels
+          # Senses: definitions/examples, concept labels, and subjects/domains
           if sense
             defs = []
             exs = []
             concepts = []
             concept_labels = []
+            subjects = []
+            subject_labels = []
+
             Array(sense).each do |s|
               defs.concat(Array(s.definition)) if s.respond_to?(:definition) && s.definition
               exs.concat(Array(s.example)) if s.respond_to?(:example) && s.example
@@ -113,12 +136,33 @@ module LinkedData
               Array(s.lexicalConcept).each do |lc|
                 concepts << lc.id.to_s
                 concept_labels.concat(Array(lc.prefLabel)) if lc.respond_to?(:prefLabel) && lc.prefLabel
+
+                # Extract subjects/domains from the lexical concept
+                next unless lc.respond_to?(:subject) && lc.subject
+
+                Array(lc.subject).each do |subj|
+                  if subj.is_a?(Hash)
+                    # Already expanded subject with prefLabel
+                    subjects << subj['@id'] if subj['@id']
+                    subject_labels << subj['prefLabel'] if subj['prefLabel']
+                  elsif subj.respond_to?(:id)
+                    # Goo resource
+                    subjects << subj.id.to_s
+                    subject_labels << subj.prefLabel if subj.respond_to?(:prefLabel) && subj.prefLabel
+                  else
+                    # URI string
+                    subjects << subj.to_s
+                  end
+                end
               end
             end
+
             doc[:definition] = defs unless defs.empty?
             doc[:example] = exs unless exs.empty?
             doc[:concept] = concepts.uniq unless concepts.empty?
             doc[:conceptLabel] = concept_labels.uniq unless concept_labels.empty?
+            doc[:subject] = subjects.uniq unless subjects.empty?
+            doc[:subjectLabel] = subject_labels.uniq unless subject_labels.empty?
           end
 
           # Concepts directly evoked by the entry (ensure they are indexed even without senses)
@@ -176,8 +220,8 @@ module LinkedData
         end
 
         # Standard serialization - Goo handles everything now
-        def to_hash(options = {})
-          super(options)
+        def to_hash(*)
+          super()
         end
 
         # Class-level helpers
@@ -195,9 +239,12 @@ module LinkedData
         def self.list_in_submission(submission, page, size, include_attrs = [])
           return [] unless submission
 
-          include_attrs = %i[lemma language partOfSpeech form sense evokes signedForm wasDerivedFrom wasInfluencedBy] if include_attrs.empty?
+          if include_attrs.empty?
+            include_attrs = %i[lemma language partOfSpeech form sense evokes signedForm wasDerivedFrom
+                               wasInfluencedBy]
+          end
           entries = LexicalEntry.in(submission).include(*include_attrs).page(page, size).all
-          
+
           # Expand provenance attributes
           entries.each { |e| expand_entry_attributes(e, submission) }
           entries
@@ -207,7 +254,10 @@ module LinkedData
         def self.list_for_ids(submission, ids, include_attrs = [])
           return [] unless submission && ids && !ids.empty?
 
-          include_attrs = %i[lemma language partOfSpeech form sense evokes signedForm wasDerivedFrom wasInfluencedBy] if include_attrs.empty?
+          if include_attrs.empty?
+            include_attrs = %i[lemma language partOfSpeech form sense evokes signedForm wasDerivedFrom
+                               wasInfluencedBy]
+          end
 
           # Convert IDs to RDF::URI if needed, ensuring valid URIs
           entry_ids = ids.map do |id|
@@ -231,7 +281,7 @@ module LinkedData
           entries = entry_ids.map do |uri|
             LexicalEntry.find(uri).in(submission).include(*include_attrs).first
           end.compact
-          
+
           # Expand provenance attributes
           entries.each { |e| expand_entry_attributes(e, submission) }
           entries
@@ -256,19 +306,20 @@ module LinkedData
           end
 
           # Expand signedForm (SignedForm with Video)
-          if entry.signedForm
-            entry.signedForm = Array(entry.signedForm).map do |sf|
-              result = LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(sf, submission, 'SignedForm', %w[signedRep])
-              # Expand nested video
-              if result.is_a?(Hash) && result['signedRep']
-                videos = Array(result['signedRep']).map do |vid|
-                  LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(vid, submission, 'Video', %w[url])
-                end
-                result['signedRep'] = videos.size == 1 ? videos.first : videos
+          return unless entry.signedForm
+
+          entry.signedForm = Array(entry.signedForm).map do |sf|
+            result = LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(sf, submission,
+                                                                                         'SignedForm', %w[signedRep])
+            # Expand nested video
+            if result.is_a?(Hash) && result['signedRep']
+              videos = Array(result['signedRep']).map do |vid|
+                LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(vid, submission, 'Video', %w[url])
               end
-              result
-            end.compact
-          end
+              result['signedRep'] = videos.size == 1 ? videos.first : videos
+            end
+            result
+          end.compact
         end
       end
     end

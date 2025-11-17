@@ -13,13 +13,41 @@ module LinkedData
         attribute :signedForm, namespace: :etv, range: -> { LinkedData::Models::OntoLex::SignedForm }
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
 
-        serialize_default :writtenRep, :gender, :number, :signedForm
+        serialize_default :writtenRep, :gender, :number, :signedForm,
+                          :lemma, :partOfSpeech, :subject, :subjectLabel, :lexicalEntries
         serialize_never :submission
         serialize_methods :properties, :computed
+        links_load submission: [ontology: [:acronym]]
+
+        # Virtual attributes for search enrichment
+        attr_reader :lemma, :partOfSpeech, :subject, :subjectLabel, :lexicalEntries
+
+        def lemma=(value, _options = {})
+          @lemma = value
+        end
+
+        def partOfSpeech=(value, _options = {})
+          @partOfSpeech = value
+        end
+
+        def subject=(value, _options = {})
+          @subject = value
+        end
+
+        def subjectLabel=(value, _options = {})
+          @subjectLabel = value
+        end
+
+        def lexicalEntries=(value, _options = {})
+          @lexicalEntries = value
+        end
 
         link_to LinkedData::Hypermedia::Link.new('self', lambda { |s|
           "ontologies/#{s.submission.ontology.acronym}/forms/#{CGI.escape(s.id.to_s)}"
-        }, uri_type)
+        }, uri_type),
+                LinkedData::Hypermedia::Link.new('ontology', lambda { |s|
+                  "ontologies/#{s.submission.ontology.acronym}"
+                }, Goo.vocabulary['Ontology'])
 
         # Grant access to all users for OntoLex entities
         grant_access_to_all true
@@ -30,6 +58,116 @@ module LinkedData
 
         def to_hash(options = {})
           super(options)
+        end
+
+        # Generate Solr document for indexing
+        def index_doc(to_set = nil)
+          return nil unless id && submission
+
+          doc = {
+            id: id.to_s,
+            resource_id: id.to_s,
+            submissionAcronym: submission.ontology.acronym,
+            ontologyId: submission.id.to_s
+          }
+
+          # Basic form attributes
+          doc[:writtenRep] = writtenRep if writtenRep
+          doc[:writtenRepExact] = writtenRep if writtenRep
+          doc[:language] = language.to_s.split('/').last if language
+          doc[:gender] = gender.to_s.split('/').last if gender
+          doc[:number] = number.to_s.split('/').last if number
+
+          # Find all LexicalEntries that reference this form
+          begin
+            entries = LexicalEntry.in(submission)
+                                  .include(:lemma, :partOfSpeech, :evokes, :canonicalForm, :form, :otherForm)
+                                  .all
+                                  .select { |e| form_referenced_by_entry?(e) }
+
+            if entries.any?
+              # Add lemmas from entries
+              lemmas = entries.map(&:lemma).compact.uniq
+              doc[:lemma] = lemmas.first if lemmas.any?
+              doc[:lemmaExact] = lemmas.first if lemmas.any?
+
+              # Add parts of speech
+              pos_values = entries.map { |e| e.partOfSpeech.to_s.split('/').last if e.partOfSpeech }.compact.uniq
+              doc[:partOfSpeech] = pos_values.first if pos_values.any?
+
+              # Get subjects from evoked concepts
+              subject_uris = []
+              subject_labels = []
+
+              entries.each do |entry|
+                next unless entry.evokes
+
+                evokes_id = entry.evokes.is_a?(Array) ? entry.evokes.first : entry.evokes
+                next unless evokes_id
+
+                # Load the concept with its subject
+                concept = LexicalConcept.find(evokes_id).in(submission).include(:subject).first
+                next unless concept&.subject
+
+                subjects = concept.subject.is_a?(Array) ? concept.subject : [concept.subject]
+                subjects.each do |subj_uri|
+                  subject_uris << subj_uri.to_s
+
+                  # Try to get label
+                  subj_concept = LexicalConcept.find(subj_uri).in(submission).include(:prefLabel).first
+                  subject_labels << subj_concept.prefLabel if subj_concept&.prefLabel
+                end
+              end
+
+              doc[:subject] = subject_uris.uniq if subject_uris.any?
+              doc[:subjectLabel] = subject_labels.uniq if subject_labels.any?
+
+              # Store entry IDs for reference
+              doc[:lexicalEntries] = entries.map { |e| e.id.to_s }
+            end
+          rescue StandardError => e
+            puts "[Form.index_doc] Error enriching form #{id}: #{e.message}"
+          end
+
+          # Suggest fields for autocomplete
+          if writtenRep
+            doc[:writtenRepSuggestEdge] = writtenRep
+            doc[:writtenRepSuggestNgram] = writtenRep
+          end
+          if doc[:lemma]
+            doc[:lemmaSuggestEdge] = doc[:lemma]
+            doc[:lemmaSuggestNgram] = doc[:lemma]
+          end
+
+          doc
+        end
+
+        # Route searches to the lexical backend (Solr core)
+        def self.search(q, params = {})
+          super(q, params, :lexical)
+        end
+
+        private
+
+        def form_referenced_by_entry?(entry)
+          return false unless entry
+
+          # Check canonicalForm
+          return true if entry.canonicalForm&.to_s == id.to_s
+
+          # Check otherForm
+          if entry.otherForm
+            other_forms = entry.otherForm.is_a?(Array) ? entry.otherForm : [entry.otherForm]
+            return true if other_forms.any? { |f| f.to_s == id.to_s }
+          end
+
+          # Check form array
+          if entry.form
+            forms = entry.form.is_a?(Array) ? entry.form : [entry.form]
+            return true if forms.any? { |f| f.to_s == id.to_s }
+          end
+
+          false
         end
 
         def self.list_for_ids(submission, ids, include_attrs = [])
@@ -58,7 +196,7 @@ module LinkedData
           forms = form_ids.map do |uri|
             Form.find(uri).in(submission).include(*include_attrs).first
           end.compact
-          
+
           # Expand signed forms
           forms.each { |f| expand_form_attributes(f, submission) }
           forms
@@ -71,7 +209,7 @@ module LinkedData
           include_attrs = %i[writtenRep language gender number signedForm] if include_attrs.empty?
 
           forms = Form.in(submission).include(*include_attrs).page(page, size).all
-          
+
           # Expand signed forms
           forms.each { |f| expand_form_attributes(f, submission) }
           forms
