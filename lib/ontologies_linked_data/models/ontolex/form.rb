@@ -74,26 +74,45 @@ module LinkedData
           # Basic form attributes
           doc[:writtenRep] = writtenRep if writtenRep
           doc[:writtenRepExact] = writtenRep if writtenRep
-          doc[:language] = language.to_s.split('/').last if language
+          
+          # Language: extract fragment from URI (e.g., "cat" from "http://lexvo.org/id/iso639-3/cat")
+          if language && !language.to_s.empty?
+            doc[:language] = language.to_s.split('/').last
+          else
+          end
+          
           doc[:gender] = gender.to_s.split('/').last if gender
           doc[:number] = number.to_s.split('/').last if number
 
           # Find all LexicalEntries that reference this form
           begin
             entries = LexicalEntry.in(submission)
-                                  .include(:lemma, :partOfSpeech, :evokes, :canonicalForm, :form, :otherForm)
+                                  .include(:lemma, :partOfSpeech, :evokes, :canonicalForm, :form, :otherForm, :language)
                                   .all
                                   .select { |e| form_referenced_by_entry?(e) }
 
+
             if entries.any?
+              # If Form doesn't have language, try to get it from the first entry
+              unless doc[:language]
+                entry_lang = entries.first.language
+                if entry_lang && !entry_lang.to_s.empty?
+                  doc[:language] = entry_lang.to_s.split('/').last
+                end
+              end
+
               # Add lemmas from entries
               lemmas = entries.map(&:lemma).compact.uniq
               doc[:lemma] = lemmas.first if lemmas.any?
               doc[:lemmaExact] = lemmas.first if lemmas.any?
 
-              # Add parts of speech
+              # Add parts of speech (URI and label)
               pos_values = entries.map { |e| e.partOfSpeech.to_s.split('/').last if e.partOfSpeech }.compact.uniq
-              doc[:partOfSpeech] = pos_values.first if pos_values.any?
+              if pos_values.any?
+                doc[:partOfSpeech] = pos_values.first
+                # Also store simple label for easier filtering (e.g., "noun" from "lexinfo#noun")
+                doc[:partOfSpeechLabel] = pos_values.first.split('#').last if pos_values.first.include?('#')
+              end
 
               # Get subjects from evoked concepts
               subject_uris = []
