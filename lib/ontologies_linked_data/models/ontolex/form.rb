@@ -74,13 +74,13 @@ module LinkedData
           # Basic form attributes
           doc[:writtenRep] = writtenRep if writtenRep
           doc[:writtenRepExact] = writtenRep if writtenRep
-          
+
           # Language: extract fragment from URI (e.g., "cat" from "http://lexvo.org/id/iso639-3/cat")
           if language && !language.to_s.empty?
             doc[:language] = language.to_s.split('/').last
           else
           end
-          
+
           doc[:gender] = gender.to_s.split('/').last if gender
           doc[:number] = number.to_s.split('/').last if number
 
@@ -91,14 +91,11 @@ module LinkedData
                                   .all
                                   .select { |e| form_referenced_by_entry?(e) }
 
-
             if entries.any?
               # If Form doesn't have language, try to get it from the first entry
               unless doc[:language]
                 entry_lang = entries.first.language
-                if entry_lang && !entry_lang.to_s.empty?
-                  doc[:language] = entry_lang.to_s.split('/').last
-                end
+                doc[:language] = entry_lang.to_s.split('/').last if entry_lang && !entry_lang.to_s.empty?
               end
 
               # Add lemmas from entries
@@ -132,8 +129,8 @@ module LinkedData
                 subjects.each do |subj_uri|
                   subject_uris << subj_uri.to_s
 
-                  # Try to get label
-                  subj_concept = LexicalConcept.find(subj_uri).in(submission).include(:prefLabel).first
+                  # Try to get label from the LexicalConcept>subject>prefLabel
+                  subj_concept = Class.find(subj_uri).in(submission).include(:prefLabel).first
                   subject_labels << subj_concept.prefLabel if subj_concept&.prefLabel
                 end
               end

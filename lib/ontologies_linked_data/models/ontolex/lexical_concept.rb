@@ -9,7 +9,6 @@ module LinkedData
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
         attribute :definition, namespace: :skos, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Definition }
         attribute :note, namespace: :skos, enforce: [:list], range: -> { LinkedData::Models::OntoLex::Note }
-        attribute :prefLabel, namespace: :skos
         attribute :inScheme, namespace: :skos
         attribute :subject, namespace: :dcterms, range: -> { LinkedData::Models::Class }
         attribute :isEvokedBy, namespace: :ontolex, enforce: [:list]
@@ -45,7 +44,7 @@ module LinkedData
         attribute :followsInTime, namespace: :rico, enforce: [:list]
         attribute :hasLocation, namespace: :dul, enforce: [:list]
 
-        serialize_default :definition, :note, :prefLabel, :inScheme, :subject, :isEvokedBy, :lexicalizedSense, :source,
+        serialize_default :definition, :note, :inScheme, :subject, :isEvokedBy, :lexicalizedSense, :source,
                           :broader, :narrower, :related,
                           :mappingRelation, :broadMatch, :closeMatch, :exactMatch, :narrowMatch, :relatedMatch,
                           :differentFrom, :antonym, :isPartOf, :hasPart,
@@ -74,7 +73,7 @@ module LinkedData
 
           # Load basic attributes - will be expanded manually
           if include_attrs.empty?
-            include_attrs = %i[definition prefLabel inScheme subject isEvokedBy
+            include_attrs = %i[definition inScheme subject isEvokedBy
                                lexicalizedSense note]
           end
 
@@ -94,7 +93,7 @@ module LinkedData
 
           # Load basic attributes - will be expanded manually
           if include_attrs.empty?
-            include_attrs = %i[definition prefLabel inScheme subject isEvokedBy
+            include_attrs = %i[definition inScheme subject isEvokedBy
                                lexicalizedSense note]
           end
 
@@ -164,8 +163,7 @@ module LinkedData
 
         # Helper class method to expand a Definition object
         def self.expand_definition_for_concept(def_obj, submission)
-          result = expand_auxiliary_entity(def_obj, submission, 'Definition', %w[language value wasDerivedFrom])
-          result
+          expand_auxiliary_entity(def_obj, submission, 'Definition', %w[language value wasDerivedFrom])
         end
 
         # Helper class method to expand a SKOS Concept object
@@ -208,17 +206,20 @@ module LinkedData
 
         # Helper method to expand a Note object
         def self.expand_note(note_obj, submission)
-          return expand_auxiliary_entity(note_obj, submission, 'Note', %w[label language value wasDerivedFrom], expand_refs: true)
+          expand_auxiliary_entity(note_obj, submission, 'Note', %w[label language value wasDerivedFrom],
+                                  expand_refs: true)
         end
 
         # Helper method to expand a Reference object (prov:Entity)
         def self.expand_reference(ref_obj, submission)
-          return expand_auxiliary_entity(ref_obj, submission, 'Reference', %w[label value hasDerivation], expand_refs: false)
+          expand_auxiliary_entity(ref_obj, submission, 'Reference', %w[label value hasDerivation],
+                                  expand_refs: false)
         end
 
         # Helper method to expand an Activity object
         def self.expand_activity(activity_obj, submission)
-          result = expand_auxiliary_entity(activity_obj, submission, 'Activity', %w[label endedAtTime hasDerivation influenced], expand_refs: false)
+          result = expand_auxiliary_entity(activity_obj, submission, 'Activity',
+                                           %w[label endedAtTime hasDerivation influenced], expand_refs: false)
           # Expand nested hasDerivation (Agent) - can be single or array
           if result.is_a?(Hash) && result['hasDerivation']
             agents = Array(result['hasDerivation']).map { |agent| expand_agent(agent, submission) }
@@ -229,7 +230,8 @@ module LinkedData
 
         # Helper method to expand an Agent object
         def self.expand_agent(agent_obj, submission)
-          return expand_auxiliary_entity(agent_obj, submission, 'Agent', %w[name mbox wasAssociatedFor], expand_refs: false)
+          expand_auxiliary_entity(agent_obj, submission, 'Agent', %w[name mbox wasAssociatedFor],
+                                  expand_refs: false)
         end
 
         # Generic helper to expand any auxiliary entity
@@ -267,7 +269,7 @@ module LinkedData
               if results && !results.empty?
                 # Collect all values for multi-valued fields
                 result = { '@id' => uri.to_s }
-                
+
                 fields.each do |field|
                   # Collect all values for this field across all result rows
                   all_vals = results.map { |r| r[field.to_sym] }.compact.uniq
@@ -286,13 +288,19 @@ module LinkedData
 
                 # Recursively expand wasDerivedFrom references only if requested
                 if expand_refs && result['wasDerivedFrom']
-                  refs = Array(result['wasDerivedFrom']).map { |ref| expand_auxiliary_entity(ref, submission, 'Reference', %w[label value hasDerivation], expand_refs: false) }
+                  refs = Array(result['wasDerivedFrom']).map do |ref|
+                    expand_auxiliary_entity(ref, submission, 'Reference', %w[label value hasDerivation],
+                                            expand_refs: false)
+                  end
                   result['wasDerivedFrom'] = refs.size == 1 ? refs.first : refs
                 end
 
                 # Recursively expand source references (for UsageExample and Usage) only if requested
                 if expand_refs && result['source']
-                  sources = Array(result['source']).map { |src| expand_auxiliary_entity(src, submission, 'Reference', %w[label value hasDerivation], expand_refs: false) }
+                  sources = Array(result['source']).map do |src|
+                    expand_auxiliary_entity(src, submission, 'Reference', %w[label value hasDerivation],
+                                            expand_refs: false)
+                  end
                   result['source'] = sources.size == 1 ? sources.first : sources
                 end
 

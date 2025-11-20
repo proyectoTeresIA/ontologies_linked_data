@@ -6,11 +6,9 @@ module LinkedData
       CONTEXTS = {}
 
       def self.serialize(obj, options = {})
-
-
         hash = obj.to_flex_hash(options) do |hash, hashed_obj|
           current_cls = hashed_obj.respond_to?(:klass) ? hashed_obj.klass : hashed_obj.class
-          result_lang = self.get_languages(get_object_submission(hashed_obj), options[:lang])
+          result_lang = get_languages(get_object_submission(hashed_obj), options[:lang])
 
           # Intentionally no OntoLex::LexicalConcept enrichment here: models/controllers handle it
 
@@ -25,28 +23,26 @@ module LinkedData
           # Add the id to json-ld attribute
           if current_cls.ancestors.include?(LinkedData::Hypermedia::Resource) && !current_cls.embedded? && hashed_obj.respond_to?(:id)
             prefixed_id = LinkedData::Models::Base.replace_url_id_to_prefix(hashed_obj.id)
-            hash["@id"] = prefixed_id.to_s
+            hash['@id'] = prefixed_id.to_s
           end
 
           # Add the type
-          hash["@type"] = type(current_cls, hashed_obj) if hash["@id"]
+          hash['@type'] = type(current_cls, hashed_obj) if hash['@id']
 
           # Generate links
           # NOTE: If this logic changes, also change in xml.rb
           if generate_links?(options)
             links = LinkedData::Hypermedia.generate_links(hashed_obj)
             unless links.empty?
-              hash["links"] = links
-              hash["links"].merge!(generate_links_context(hashed_obj)) if generate_context?(options)
+              hash['links'] = links
+              hash['links'].merge!(generate_links_context(hashed_obj)) if generate_context?(options)
             end
           end
 
           # Generate context
-          if current_cls.ancestors.include?(Goo::Base::Resource) && !current_cls.embedded?
-            if generate_context?(options)
-              context = generate_context(hashed_obj, hash.keys, options)
-              hash.merge!(context)
-            end
+          if current_cls.ancestors.include?(Goo::Base::Resource) && !current_cls.embedded? && generate_context?(options)
+            context = generate_context(hashed_obj, hash.keys, options)
+            hash.merge!(context)
           end
           hash['@context']['@language'] = result_lang if hash['@context']
 
@@ -74,6 +70,7 @@ module LinkedData
         # Convert RDF::URI, RDF::Node, RDF::Vocabulary terms into strings recursively
         if defined?(RDF)
           return obj.to_s if obj.is_a?(RDF::URI) || obj.is_a?(RDF::Node)
+
           # Many RDF vocab terms respond to to_uri
           if !obj.is_a?(String) && obj.respond_to?(:to_uri)
             begin
@@ -91,14 +88,62 @@ module LinkedData
             acc[k] = stringify_rdf_objects(v)
           end
         else
-          # Coerce any non-primitive, non-nil object to string to avoid ActiveSupport as_json introspection
+          # Coerce any non-primitive, non-nil object to a JSON-friendly structure.
+          # Prefer explicit JSON/hash conversion methods when available to preserve structure.
           if obj.nil? || obj.is_a?(Numeric) || obj.is_a?(TrueClass) || obj.is_a?(FalseClass) || obj.is_a?(String)
             obj
+          # Handle Date/DateTime/Time objects - convert to ISO8601 string
+          elsif defined?(DateTime) && obj.is_a?(DateTime)
+            obj.to_s
+          elsif defined?(Date) && obj.is_a?(Date)
+            obj.to_s
+          elsif defined?(Time) && obj.is_a?(Time)
+            obj.iso8601
           else
             begin
-              obj.to_s
+              # Prefer as_json if implemented
+              if obj.respond_to?(:as_json)
+                stringify_rdf_objects(obj.as_json)
+              # Fallback to to_h for plain Ruby objects that can be converted
+              elsif obj.respond_to?(:to_h)
+                stringify_rdf_objects(obj.to_h)
+              # Some objects (models) expose to_flex_hash - use it if present
+              elsif obj.respond_to?(:to_flex_hash)
+                begin
+                  stringify_rdf_objects(obj.to_flex_hash({}))
+                rescue StandardError
+                  # Fall through to instance variable inspection
+                end
+              end
+
+              # If still not handled, try building a hash from instance variables
+              if !obj.is_a?(String) && obj.respond_to?(:instance_variables)
+                obj.instance_variables.each_with_object({}) do |var, acc|
+                  key = var.to_s.delete('@')
+                  begin
+                    acc[key] = stringify_rdf_objects(obj.instance_variable_get(var))
+                  rescue StandardError
+                    acc[key] = begin
+                      obj.instance_variable_get(var).to_s
+                    rescue StandardError
+                      obj.instance_variable_get(var).inspect
+                    end
+                  end
+                end
+              else
+                # Final fallback: to_s
+                begin
+                  obj.to_s
+                rescue StandardError
+                  obj.inspect
+                end
+              end
             rescue StandardError
-              obj.inspect
+              begin
+                obj.to_s
+              rescue StandardError
+                obj.inspect
+              end
             end
           end
         end
@@ -115,11 +160,11 @@ module LinkedData
           obj.each do |k, v|
             sk = k.to_s
             nv = normalize_keys_and_dedup(v)
-            if acc.key?(sk)
-              acc[sk] = merge_values(acc[sk], nv)
-            else
-              acc[sk] = nv
-            end
+            acc[sk] = if acc.key?(sk)
+                        merge_values(acc[sk], nv)
+                      else
+                        nv
+                      end
           end
           acc
         else
@@ -134,6 +179,7 @@ module LinkedData
           (a + b).each_with_object([]) do |e, arr|
             key = e.is_a?(Hash) ? e.hash : e
             next if seen[key]
+
             arr << e
             seen[key] = true
           end
@@ -143,17 +189,19 @@ module LinkedData
         else
           # Prefer 'a' when present; do not overwrite empty arrays/strings with nil
           return a unless a.nil?
+
           b
         end
       end
 
       def self.get_object_submission(obj)
         # For Ontology objects, use latest_submission (submission method requires an ID)
-        if obj.class.name == "LinkedData::Models::Ontology"
+        if obj.class.name == 'LinkedData::Models::Ontology'
           return obj.respond_to?(:latest_submission) ? obj.latest_submission : nil
         end
         # Prefer direct submission accessor when present (works for read_only structs)
         return obj.submission if obj.respond_to?(:submission) && !obj.submission.nil?
+
         # Otherwise, check class attributes for Resource instances
         obj.class.respond_to?(:attributes) && obj.class.attributes.include?(:submission) ? obj.submission : nil
       rescue ArgumentError
@@ -162,18 +210,17 @@ module LinkedData
       end
 
       def self.get_languages(submission, user_languages)
-
         if user_languages.eql?(:all) || user_languages.blank?
           if submission
             submission.bring(:naturalLanguage) if submission.bring?(:naturalLanguage)
             submission_languages_languages = get_submission_languages(submission.naturalLanguage)
           end
 
-          if submission_languages_languages.blank?
-            result_lang = [Goo.main_languages.first.to_s]
-          else
-            result_lang = [submission_languages_languages.first]
-          end
+          result_lang = if submission_languages_languages.blank?
+                          [Goo.main_languages.first.to_s]
+                        else
+                          [submission_languages_languages.first]
+                        end
         else
           result_lang = Array(user_languages)
         end
@@ -188,8 +235,12 @@ module LinkedData
       end
 
       def self.get_submission_languages(submission_natural_language = [])
-        submission_natural_language = submission_natural_language.values.flatten if submission_natural_language.is_a?(Hash)
-        submission_natural_language.map { |natural_language| natural_language.to_s.split('/').last[0..1].to_sym }.compact
+        if submission_natural_language.is_a?(Hash)
+          submission_natural_language = submission_natural_language.values.flatten
+        end
+        submission_natural_language.map do |natural_language|
+          natural_language.to_s.split('/').last[0..1].to_sym
+        end.compact
       end
 
       def self.type(current_cls, hashed_obj)
@@ -211,18 +262,17 @@ module LinkedData
 
       def self.generate_context(object, serialized_attrs = [], options = {})
         return remove_unused_attrs(CONTEXTS[object.hash], serialized_attrs) unless CONTEXTS[object.hash].nil?
+
         hash = {}
         current_cls = object.respond_to?(:klass) ? object.klass : object.class
         class_attributes = current_cls.attributes
-        hash["@vocab"] = Goo.vocabulary.to_s
+        hash['@vocab'] = Goo.vocabulary.to_s
         class_attributes.each do |attr|
-          if current_cls.model_settings[:range].key?(attr)
-            linked_model = current_cls.model_settings[:range][attr]
-          end
+          linked_model = current_cls.model_settings[:range][attr] if current_cls.model_settings[:range].key?(attr)
 
           if linked_model && linked_model.ancestors.include?(Goo::Base::Resource) && !embedded?(object, attr)
             # linked object
-            predicate = { "@id" => linked_model.type_uri.to_s, "@type" => "@id" }
+            predicate = { '@id' => linked_model.type_uri.to_s, '@type' => '@id' }
           else
             # use the original predicate property if set
             predicate_attr = if current_cls.model_settings[:attributes][attr][:property].is_a?(Proc)
@@ -233,13 +283,16 @@ module LinkedData
 
             # predicate with custom namespace
             # if the namespace can be resolved by the namespaces added in Goo then it will be resolved.
-            predicate = "#{Goo.vocabulary(current_cls.model_settings[:attributes][attr][:namespace])&.to_s}#{predicate_attr}"
+            predicate = "#{Goo.vocabulary(current_cls.model_settings[:attributes][attr][:namespace])}#{predicate_attr}"
           end
           hash[attr] = predicate unless predicate.nil?
         end
-        context = { "@context" => hash }
+        context = { '@context' => hash }
         CONTEXTS[object.hash] = context
-        context = remove_unused_attrs(context, serialized_attrs) unless options[:params] && options[:params]["full_context"].eql?("true")
+        unless options[:params] && options[:params]['full_context'].eql?('true')
+          context = remove_unused_attrs(context,
+                                        serialized_attrs)
+        end
         context
       end
 
@@ -250,40 +303,40 @@ module LinkedData
         links.each do |link|
           links_context[link.type] = link.type_uri.to_s
         end
-        return { "@context" => links_context }
+        { '@context' => links_context }
       end
 
       def self.remove_unused_attrs(context, serialized_attrs = [])
-        new_context = context["@context"].reject { |k, v| !serialized_attrs.include?(k) && !k.to_s.start_with?("@") }
-        { "@context" => new_context }
+        new_context = context['@context'].reject { |k, v| !serialized_attrs.include?(k) && !k.to_s.start_with?('@') }
+        { '@context' => new_context }
       end
 
       def self.embedded?(object, attribute)
         current_cls = object.respond_to?(:klass) ? object.klass : object.class
         embedded = false
         embedded = true if current_cls.hypermedia_settings[:embed].include?(attribute)
-        embedded = true if (
+        embedded = true if
           !current_cls.hypermedia_settings[:embed_values].empty? && current_cls.hypermedia_settings[:embed_values].first.key?(attribute)
-        )
+
         embedded
       end
 
       def self.generate_context?(options)
         params = options[:params]
         params.nil? ||
-          (params["no_context"].nil? ||
-            !params["no_context"].eql?("true")) &&
-            (params["display_context"].nil? ||
-              !params["display_context"].eql?("false"))
+          (params['no_context'].nil? ||
+            !params['no_context'].eql?('true')) &&
+            (params['display_context'].nil? ||
+              !params['display_context'].eql?('false'))
       end
 
       def self.generate_links?(options)
         params = options[:params]
         params.nil? ||
-          (params["no_links"].nil? ||
-            !params["no_links"].eql?("true")) &&
-            (params["display_links"].nil? ||
-              !params["display_links"].eql?("false"))
+          (params['no_links'].nil? ||
+            !params['no_links'].eql?('true')) &&
+            (params['display_links'].nil? ||
+              !params['display_links'].eql?('false'))
       end
     end
   end
