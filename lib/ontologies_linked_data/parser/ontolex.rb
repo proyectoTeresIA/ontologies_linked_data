@@ -49,6 +49,7 @@ module LinkedData
       OLIA      = RDF::Vocabulary.new('http://purl.org/olia/olia.owl#')
       OWL       = RDF::Vocabulary.new('http://www.w3.org/2002/07/owl#')
       RICO      = RDF::Vocabulary.new('https://www.ica.org/standards/RiC/ontology#')
+      RDF_NS    = RDF::Vocabulary.new('https://www.w3.org/1999/02/22-rdf-syntax-ns#')
       DUL       = RDF::Vocabulary.new('http://www.ontologydesignpatterns.org/ont/dul/DUL.owl#')
       RDF_TYPE  = [
         RDF::URI('http://www.w3.org/1999/02/22-rdf-syntax-ns#type'),
@@ -83,8 +84,8 @@ module LinkedData
           notes = index_notes(graph, submission)
           usage_examples = index_usage_examples(graph, submission)
           usages = index_usages(graph, submission)
-          signed_forms = index_signed_forms(graph, submission)
-          videos = index_videos(graph, submission)
+          videos_by_id = index_videos(graph, submission)
+          signed_forms_by_id = index_signed_forms(graph, submission, videos_by_id)
 
           # Parse SKOS Concepts as Class objects (these are subjects for LexicalConcepts)
           skos_concepts_by_id, skos_concepts = index_skos_concepts(graph, submission)
@@ -93,7 +94,7 @@ module LinkedData
           concepts_by_id, concepts = index_concepts(graph, submission, skos_concepts_by_id)
           forms = index_forms(graph, submission)
           senses_by_id, senses = index_senses(graph, submission, concepts_by_id)
-          entries_by_id, entries = index_entries(graph, submission, forms, senses_by_id, concepts_by_id)
+          entries_by_id, entries = index_entries(graph, submission, forms, senses_by_id, concepts_by_id, signed_forms_by_id)
 
           # Second pass: link cross-references now that all objects exist
           link_cross_references(graph, concepts_by_id, entries_by_id, senses_by_id, submission)
@@ -107,8 +108,8 @@ module LinkedData
             notes: notes,
             usage_examples: usage_examples,
             usages: usages,
-            signed_forms: signed_forms,
-            videos: videos,
+            signed_forms: signed_forms_by_id,
+            videos: videos_by_id,
             references: references,
             activities: activities,
             agents: agents,
@@ -187,7 +188,7 @@ module LinkedData
             lang = values_for(graph, orig_id, DCTERMS.language)
             defn.language = lang if lang
 
-            value = values_for(graph, orig_id, RDF.value)
+            value = values_for(graph, orig_id, RDF_NS.value)
             defn.value = value if value
 
             derived_from = ref_values_for(graph, orig_id, PROV.wasDerivedFrom)
@@ -258,7 +259,7 @@ module LinkedData
             lang = values_for(graph, orig_id, DCTERMS.language)
             example.language = lang if lang
 
-            value = values_for(graph, orig_id, RDF.value)
+            value = values_for(graph, orig_id, RDF_NS.value)
             example.value = value if value
 
             source = values_for(graph, orig_id, DCTERMS.source)
@@ -293,7 +294,7 @@ module LinkedData
             lang = values_for(graph, orig_id, DCTERMS.language)
             usage.language = lang if lang
 
-            value = values_for(graph, orig_id, RDF.value)
+            value = values_for(graph, orig_id, RDF_NS.value)
             usage.value = value if value
 
             source = ref_values_for(graph, orig_id, DCTERMS.source)
@@ -312,11 +313,11 @@ module LinkedData
           usages
         end
 
-        def index_signed_forms(graph, submission)
-          signed_forms = []
+        def index_signed_forms(graph, submission, videos_by_id)
+          signed_forms = {}
           warn('[OntoLex] Indexing SignedForm objects...')
 
-          sf_ids = subjects_of_type(graph, ETV.SignedForm)
+          sf_ids = subjects_of_type(graph, ETV.signedForm)
           warn("[OntoLex] Found #{sf_ids.size} SignedForm subjects")
 
           sf_ids.each do |orig_id|
@@ -325,13 +326,24 @@ module LinkedData
             sf = LinkedData::Models::OntoLex::SignedForm.new(id: id)
             sf.submission = submission
 
-            signed_rep = values_for(graph, orig_id, ETV.signedRep)
-            sf.signedRep = signed_rep if signed_rep
+            # Read signedRep property and link to Video object
+            # signedRep is singular (not a list), so we take the first one
+            signed_rep_refs = graph.query(subject: orig_id, predicate: conv_uri(ETV.signedRep))
+            signed_rep_refs.each do |statement|
+              video = videos_by_id[statement.object]
+              if video
+                sf.signedRep = video  # Assign first video
+                warn("[OntoLex] Linked SignedForm #{id} -> Video #{video.id}")
+                break  # Only take the first one
+              else
+                warn("[OntoLex] WARNING: SignedForm #{id} references unknown Video #{statement.object}")
+              end
+            end
 
             if sf.valid?
               warn("[OntoLex] Saving SignedForm #{id}")
               sf.save(override_security: true)
-              signed_forms << sf
+              signed_forms[orig_id] = sf
             else
               warn("[OntoLex] SignedForm INVALID: #{id}, errors: #{sf.errors}")
             end
@@ -342,7 +354,7 @@ module LinkedData
         end
 
         def index_videos(graph, submission)
-          videos = []
+          videos = {}
           warn('[OntoLex] Indexing Video objects...')
 
           video_ids = subjects_of_type(graph, ETV.Video)
@@ -360,7 +372,7 @@ module LinkedData
             if video.valid?
               warn("[OntoLex] Saving Video #{id}")
               video.save(override_security: true)
-              videos << video
+              videos[orig_id] = video
             else
               warn("[OntoLex] Video INVALID: #{id}, errors: #{video.errors}")
             end
@@ -386,7 +398,7 @@ module LinkedData
             label = values_for(graph, orig_id, RDF::RDFS.label)
             ref.label = label if label
 
-            value = values_for(graph, orig_id, RDF.value)
+            value = values_for(graph, orig_id, RDF_NS.value)
             ref.value = value if value
 
             has_derivation = ref_values_for(graph, orig_id, PROV.hasDerivation)
@@ -422,6 +434,10 @@ module LinkedData
 
             ended_at = values_for(graph, orig_id, PROV.endedAtTime)
             act.endedAtTime = ended_at if ended_at
+
+            # hasDerivation points to Agent
+            has_deriv = values_for(graph, orig_id, PROV.hasDerivation)
+            act.hasDerivation = has_deriv if has_deriv
 
             assoc_with = values_for(graph, orig_id, PROV.wasAssociatedWith)
             act.wasAssociatedWith = assoc_with if assoc_with
@@ -747,7 +763,7 @@ module LinkedData
           [senses, senses.values]
         end
 
-        def index_entries(graph, submission, forms_by_id, senses_by_id, concepts_by_id)
+        def index_entries(graph, submission, forms_by_id, senses_by_id, concepts_by_id, signed_forms_by_id = {})
           entries = []
           entries_by_id = {}
           ids = subjects_of_type(graph, ONTOLEX.LexicalEntry)
@@ -777,6 +793,14 @@ module LinkedData
 
             valency = ref_values_for(graph, orig_id, OLIA.hasValency)
             e.hasValency = valency if valency && !valency.empty?
+
+            # signedForm for entries - link to SignedForm objects
+            signed_forms_list = []
+            graph.query(subject: orig_id, predicate: conv_uri(ETV.signedForm)).each do |vs|
+              sf = signed_forms_by_id[vs.object]
+              signed_forms_list << sf if sf
+            end
+            e.signedForm = signed_forms_list unless signed_forms_list.empty?
 
             derived_from = ref_values_for(graph, orig_id, PROV.wasDerivedFrom)
             e.wasDerivedFrom = derived_from if derived_from && !derived_from.empty?
@@ -809,11 +833,12 @@ module LinkedData
 
             if e.valid?
               e.save(override_security: true)
-              if !forms.empty? || !linked_senses.empty?
+              if !forms.empty? || !linked_senses.empty? || !signed_forms_list.empty?
                 graph_uri = submission.id
                 entry_uri = e.id
                 form_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#form')
                 sense_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#sense')
+                signed_form_predicate = RDF::URI('https://w3id.org/def/easytv#signedForm')
 
                 client = Goo.sparql_query_client(:main)
 
@@ -834,6 +859,16 @@ module LinkedData
                     warn("[OntoLex] Manually inserted sense triple: #{entry_uri} -> #{sense.id}")
                   rescue StandardError => e
                     warn("[OntoLex] Failed to insert sense triple: #{e.message}")
+                  end
+                end
+
+                signed_forms_list.each do |sf|
+                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{entry_uri}> <#{signed_form_predicate}> <#{sf.id}> } }"
+                  begin
+                    client.update(insert_query)
+                    warn("[OntoLex] Manually inserted signedForm triple: #{entry_uri} -> #{sf.id}")
+                  rescue StandardError => e
+                    warn("[OntoLex] Failed to insert signedForm triple: #{e.message}")
                   end
                 end
 

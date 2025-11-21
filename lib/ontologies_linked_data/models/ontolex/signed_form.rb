@@ -4,7 +4,7 @@ module LinkedData
       class SignedForm < LinkedData::Models::Base
         model :signed_form, name_with: :id, collection: :submission,
                             namespace: :etv, schemaless: :true,
-                            rdf_type: ->(*_x) { Goo.vocabulary(:etv)['SignedForm'] }
+                            rdf_type: ->(*_x) { Goo.vocabulary(:etv)['signedForm'] }
 
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
         attribute :signedRep, namespace: :etv, range: -> { LinkedData::Models::OntoLex::Video }
