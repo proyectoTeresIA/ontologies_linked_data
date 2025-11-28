@@ -13,7 +13,7 @@ module LinkedData
         attribute :signedForm, namespace: :etv, range: -> { LinkedData::Models::OntoLex::SignedForm }
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
 
-        serialize_default :writtenRep, :gender, :number, :signedForm,
+        serialize_default :writtenRep, :language, :gender, :number, :signedForm,
                           :lemma, :partOfSpeech, :subject, :subjectLabel, :lexicalEntries
         serialize_never :submission
         serialize_methods :properties, :computed
