@@ -291,22 +291,22 @@ module LinkedData
         def self.expand_entry_attributes(entry, submission)
           return unless entry
 
-          # Expand wasDerivedFrom (References)
-          if entry.wasDerivedFrom
+          # Expand wasDerivedFrom (References) - only if loaded
+          if entry.loaded_attributes.include?(:wasDerivedFrom) && entry.wasDerivedFrom
             entry.wasDerivedFrom = Array(entry.wasDerivedFrom).map do |ref|
               LinkedData::Models::OntoLex::LexicalConcept.expand_reference(ref, submission)
             end.compact
           end
 
-          # Expand wasInfluencedBy (Activities)
-          if entry.wasInfluencedBy
+          # Expand wasInfluencedBy (Activities) - only if loaded
+          if entry.loaded_attributes.include?(:wasInfluencedBy) && entry.wasInfluencedBy
             entry.wasInfluencedBy = Array(entry.wasInfluencedBy).map do |activity|
               LinkedData::Models::OntoLex::LexicalConcept.expand_activity(activity, submission)
             end.compact
           end
 
-          # Expand signedForm (SignedForm with Video)
-          return unless entry.signedForm
+          # Expand signedForm (SignedForm with Video) - only if loaded
+          return unless entry.loaded_attributes.include?(:signedForm) && entry.signedForm
 
           entry.signedForm = Array(entry.signedForm).map do |sf|
             result = LinkedData::Models::OntoLex::LexicalConcept.expand_auxiliary_entity(sf, submission,

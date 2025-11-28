@@ -42,7 +42,7 @@ module LinkedData
         end
 
         def to_hash(options = {})
-          super(options)
+          super()
         end
 
         def self.list_in_submission(submission, page, size, include_attrs = [])
@@ -101,14 +101,14 @@ module LinkedData
           return unless sense
 
           # Expand usageExample (UsageExample objects)
-          if sense.usageExample
+          if sense.loaded_attributes.include?(:usageExample) && sense.usageExample
             sense.usageExample = Array(sense.usageExample).map do |ue|
               expand_usage_example(ue, submission)
             end.compact
           end
 
           # Expand usage (Usage objects)
-          if sense.usage
+          if sense.loaded_attributes.include?(:usage) && sense.usage
             sense.usage = Array(sense.usage).map do |u|
               expand_usage(u, submission)
             end.compact

@@ -9,9 +9,10 @@ module LinkedData
         attribute :submission, collection: ->(s) { s.resource_id }, namespace: :metadata
         attribute :language, namespace: :dcterms
         attribute :value, namespace: :rdf, property: :value
+        attribute :label, namespace: :rdfs, property: :label
         attribute :wasDerivedFrom, namespace: :prov, enforce: [:list]
 
-        serialize_default :language, :value, :wasDerivedFrom
+        serialize_default :language, :value, :label, :wasDerivedFrom
         serialize_never :submission
 
         # Grant access to all users for OntoLex entities

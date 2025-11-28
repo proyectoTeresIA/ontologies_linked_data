@@ -191,6 +191,9 @@ module LinkedData
             value = values_for(graph, orig_id, RDF_NS.value)
             defn.value = value if value
 
+            label = values_for(graph, orig_id, RDF::RDFS.label)
+            defn.label = label if label
+
             derived_from = ref_values_for(graph, orig_id, PROV.wasDerivedFrom)
             defn.wasDerivedFrom = derived_from if derived_from && !derived_from.empty?
 

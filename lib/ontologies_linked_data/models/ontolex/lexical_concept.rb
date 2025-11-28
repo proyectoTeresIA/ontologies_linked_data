@@ -163,7 +163,7 @@ module LinkedData
 
         # Helper class method to expand a Definition object
         def self.expand_definition_for_concept(def_obj, submission)
-          expand_auxiliary_entity(def_obj, submission, 'Definition', %w[language value wasDerivedFrom])
+          expand_auxiliary_entity(def_obj, submission, 'Definition', %w[language value label wasDerivedFrom])
         end
 
         # Helper class method to expand a SKOS Concept object

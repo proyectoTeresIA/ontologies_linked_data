@@ -57,7 +57,7 @@ module LinkedData
         end
 
         def to_hash(options = {})
-          super(options)
+          super()
         end
 
         # Generate Solr document for indexing
@@ -233,7 +233,7 @@ module LinkedData
 
         # Expand signedForm attributes
         def self.expand_form_attributes(form, submission)
-          return unless form && form.signedForm
+          return unless form && form.loaded_attributes.include?(:signedForm) && form.signedForm
 
           form.signedForm = expand_signed_form(form.signedForm, submission)
         end
