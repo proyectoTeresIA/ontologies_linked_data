@@ -99,9 +99,14 @@ module LinkedData
           # Second pass: link cross-references now that all objects exist
           link_cross_references(graph, concepts_by_id, entries_by_id, senses_by_id, submission)
 
+          # Generate mapping triples for LOOM and SAME_URI mappings
+          # This enables cross-ontology mapping discovery for OntoLex terminologies
+          # Note: Only LexicalEntries are processed (not concepts) since they have lexical forms
+          generate_mapping_triples(entries, submission)
+
           {
             entries: entries,
-            senses: senses,
+            senses: senses_by_id,
             concepts: concepts,
             forms: forms,
             definitions: definitions,
@@ -587,9 +592,6 @@ module LinkedData
             schemes = values_for(graph, orig_id, SKOS.inScheme)
             lc.inScheme = schemes.is_a?(Array) ? schemes.first : schemes if schemes
 
-            pref_label = values_for(graph, orig_id, SKOS.prefLabel)
-            lc.prefLabel = pref_label.is_a?(Array) ? pref_label.first : pref_label if pref_label
-
             source = values_for(graph, orig_id, DCTERMS.source)
             lc.source = source if source
 
@@ -948,6 +950,119 @@ module LinkedData
           end
 
           warn('[OntoLex] Second pass completed')
+        end
+
+        # Generate mapping triples for LOOM (lexical matching) and SAME_URI mappings
+        # This enables OntoLex terminologies to participate in cross-ontology mapping discovery
+        # following the same pattern used for OWL/SKOS ontologies in MissingLabelsHandler
+        # Note: Only LexicalEntries are processed since LexicalConcepts don't have prefLabel
+        def generate_mapping_triples(entries, submission)
+          warn('[OntoLex] Generating mapping triples for LOOM and SAME_URI...')
+          
+          # Skip if this is a view ontology
+          submission.bring(:ontology) if submission.respond_to?(:bring) && submission.bring?(:ontology)
+          submission.ontology.bring(:viewOf) if submission.ontology.respond_to?(:bring) && submission.ontology.bring?(:viewOf)
+          
+          if submission.ontology.viewOf
+            warn('[OntoLex] Skipping mapping generation for view ontology')
+            return
+          end
+
+          mapping_triples = []
+          mapping_loom_predicate = Goo.vocabulary(:metadata_def)[:mappingLoom]
+          mapping_same_uri_predicate = Goo.vocabulary(:metadata_def)[:mappingSameURI]
+          
+          # Query for all entries and their form writtenReps directly from triple store
+          # This is more reliable than navigating through objects since forms may not be fully loaded
+          query = <<-SPARQL
+SELECT DISTINCT ?entry (SAMPLE(?rep) as ?label)
+WHERE {
+  GRAPH <#{submission.id}> {
+    ?entry a <http://www.w3.org/ns/lemon/ontolex#LexicalEntry> .
+    ?entry <http://www.w3.org/ns/lemon/ontolex#form> ?form .
+    ?form <http://www.w3.org/ns/lemon/ontolex#writtenRep> ?rep .
+  }
+}
+GROUP BY ?entry
+          SPARQL
+
+          epr = Goo.sparql_query_client(:main)
+          solutions = epr.query(query)
+          
+          warn("[OntoLex] Found #{solutions.length} entries with labels for LOOM matching")
+          
+          solutions.each do |sol|
+            entry_id = sol[:entry].to_s
+            label = sol[:label].to_s
+            
+            if label && !label.empty?
+              loom_label = loom_transform_literal(label)
+              
+              if loom_label.length > 2
+                mapping_triples << "<#{entry_id}> <#{mapping_loom_predicate}> \"#{loom_label}\" ."
+              end
+            end
+            
+            # SAME_URI mapping
+            mapping_triples << "<#{entry_id}> <#{mapping_same_uri_predicate}> <#{entry_id}> ."
+          end
+          
+          # Insert mapping triples into the triple store
+          if mapping_triples.length > 0
+            warn("[OntoLex] Asserting #{mapping_triples.length} mapping triples for submission #{submission.id}")
+            
+            begin
+              # Insert in batches to avoid issues with large datasets
+              batch_size = 1000
+              mapping_triples.each_slice(batch_size) do |batch|
+                triples_str = batch.join("\n")
+                Goo.sparql_data_client.append_triples(
+                  submission.id, 
+                  triples_str, 
+                  mime_type = "application/x-turtle")
+              end
+              warn("[OntoLex] Mapping triples successfully inserted")
+              
+              # Regenerate mapping counts for this ontology so mappings appear in the frontend
+              regenerate_mapping_counts(submission)
+            rescue StandardError => e
+              warn("[OntoLex] Failed to insert mapping triples: #{e.message}")
+            end
+          else
+            warn('[OntoLex] No mapping triples generated')
+          end
+        end
+
+        # Regenerate mapping counts for the ontology after parsing
+        # This updates the MappingCount cache that the frontend uses to display mappings
+        def regenerate_mapping_counts(submission)
+          acronym = submission.ontology.acronym
+          warn("[OntoLex] Regenerating mapping counts for #{acronym}...")
+          
+          begin
+            require 'logger'
+            logger = Logger.new(STDERR)
+            logger.level = Logger::INFO
+            
+            LinkedData::Mappings.create_mapping_counts(logger, [acronym])
+            warn("[OntoLex] Mapping counts regenerated successfully for #{acronym}")
+          rescue StandardError => e
+            warn("[OntoLex] Failed to regenerate mapping counts: #{e.message}")
+            warn("[OntoLex] You can manually run: LinkedData::Mappings.create_mapping_counts(Logger.new(STDOUT), ['#{acronym}'])")
+          end
+        end
+
+        # Transform a label for LOOM lexical matching
+        # Removes whitespace and punctuation, lowercases the result
+        # Same algorithm as LinkedData::Models::OntologySubmission.loom_transform_literal
+        def loom_transform_literal(lit)
+          res = []
+          lit.to_s.each_char do |c|
+            if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+              res << c.downcase
+            end
+          end
+          res.join('')
         end
 
         def subjects_of_type(graph, type_uri)

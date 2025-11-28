@@ -9,11 +9,11 @@ module Mappings
       predicates = {}
       predicates["CUI"] = ["http://bioportal.bioontology.org/ontologies/umls/cui"]
       predicates["SAME_URI"] =
-        ["http://data.bioontology.org/metadata/def/mappingSameURI"]
+        [Goo.vocabulary(:metadata_def)[:mappingSameURI].to_s]
       predicates["LOOM"] =
-        ["http://data.bioontology.org/metadata/def/mappingLoom"]
+        [Goo.vocabulary(:metadata_def)[:mappingLoom].to_s]
       predicates["REST"] =
-        ["http://data.bioontology.org/metadata/def/mappingRest"]
+        [Goo.vocabulary(:metadata_def)[:mappingRest].to_s]
       return predicates
     end
 
@@ -215,6 +215,29 @@ eos
                                     reload_cache=reload_cache)
   end
 
+  # Check if an ontology uses OntoLex format based on the submission's hasOntologyLanguage
+  def self.is_ontolex_ontology?(acronym)
+    return @ontolex_cache[acronym] if defined?(@ontolex_cache) && @ontolex_cache.key?(acronym)
+    
+    @ontolex_cache ||= {}
+    
+    begin
+      ont = LinkedData::Models::Ontology.find(acronym).first
+      return false unless ont
+      
+      sub = ont.latest_submission(status: :any)
+      return false unless sub
+      
+      sub.bring(:hasOntologyLanguage) if sub.bring?(:hasOntologyLanguage)
+      is_ontolex = sub.hasOntologyLanguage && sub.hasOntologyLanguage.id.to_s.include?('ONTOLEX')
+      @ontolex_cache[acronym] = is_ontolex
+      return is_ontolex
+    rescue => e
+      @ontolex_cache[acronym] = false
+      return false
+    end
+  end
+
   def self.read_only_class(classId,submissionId)
       ontologyId = submissionId
       acronym = nil
@@ -234,11 +257,20 @@ eos
               id: RDF::IRI.new(ontologyId+"/submissions/latest"),
               # id: RDF::IRI.new(submissionId),
               ontology: ontology)
-      mappedClass = LinkedData::Models::Class
-            .read_only(
-              id: RDF::IRI.new(classId),
-              submission: submission,
-              urn_id: LinkedData::Models::Class.urn_id(acronym,classId) )
+      
+      # Check if this is an OntoLex ontology and return appropriate type
+      if is_ontolex_ontology?(acronym)
+        mappedClass = LinkedData::Models::OntoLex::LexicalEntry
+              .read_only(
+                id: RDF::IRI.new(classId),
+                submission: submission)
+      else
+        mappedClass = LinkedData::Models::Class
+              .read_only(
+                id: RDF::IRI.new(classId),
+                submission: submission,
+                urn_id: LinkedData::Models::Class.urn_id(acronym,classId) )
+      end
       return mappedClass
   end
 
@@ -467,24 +499,30 @@ eos
 
   def self.retrieve_latest_submission_ids(options = {})
     include_views = options[:include_views] || false
+    metadata_ontology = Goo.vocabulary(:metadata)[:ontology].to_s
+    metadata_submissionId = Goo.vocabulary(:metadata)[:submissionId].to_s
+    metadata_submissionStatus = Goo.vocabulary(:metadata)[:submissionStatus].to_s
+    metadata_code = Goo.vocabulary(:metadata)[:code].to_s
+    metadata_viewOf = Goo.vocabulary(:metadata)[:viewOf].to_s
+    
     ids_query = <<-eos
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 SELECT (CONCAT(xsd:string(?ontology), "/submissions/", xsd:string(MAX(?submissionId))) as ?id)
 WHERE { 
-	?id <http://data.bioontology.org/metadata/ontology> ?ontology .
-	?id <http://data.bioontology.org/metadata/submissionId> ?submissionId .
-	?id <http://data.bioontology.org/metadata/submissionStatus> ?submissionStatus .
-	?submissionStatus <http://data.bioontology.org/metadata/code> "RDF" . 
+	?id <#{metadata_ontology}> ?ontology .
+	?id <#{metadata_submissionId}> ?submissionId .
+	?id <#{metadata_submissionStatus}> ?submissionStatus .
+	?submissionStatus <#{metadata_code}> "RDF" . 
 	include_views_filter 
 }
 GROUP BY ?ontology
     eos
     include_views_filter = include_views ? '' : <<-eos
 	OPTIONAL { 
-		?id <http://data.bioontology.org/metadata/ontology> ?ontJoin .  
+		?id <#{metadata_ontology}> ?ontJoin .  
 	} 
 	OPTIONAL { 
-		?ontJoin <http://data.bioontology.org/metadata/viewOf> ?viewOf .  
+		?ontJoin <#{metadata_viewOf}> ?viewOf .  
 	} 
 	FILTER(!BOUND(?viewOf))
     eos
@@ -569,7 +607,7 @@ GROUP BY ?ontology
 
           begin
             if inst.valid?
-              inst.save
+              inst.save(override_security: true)
             else
               logger.error("Error updating mapping count for #{acr}: #{inst.id.to_s}. #{inst.errors}")
               next
@@ -587,7 +625,7 @@ GROUP BY ?ontology
 
         begin
           if m.valid?
-            m.save
+            m.save(override_security: true)
           else
             logger.error("Error saving new mapping count for #{acr}. #{m.errors}")
             next
@@ -654,7 +692,7 @@ GROUP BY ?ontology
 
             begin
               if inst.valid?
-                inst.save()
+                inst.save(override_security: true)
                 # inst.save({ batch: fsave })
               else
                 logger.error("Error updating mapping count for the pair [#{acr}, #{other}]: #{inst.id.to_s}. #{inst.errors}")
@@ -673,7 +711,7 @@ GROUP BY ?ontology
 
           begin
             if m.valid?
-              m.save()
+              m.save(override_security: true)
               # m.save({ batch: fsave })
             else
               logger.error("Error saving new mapping count for the pair [#{acr}, #{other}]. #{m.errors}")

@@ -141,9 +141,7 @@ class TestOntoLexParser < LinkedData::TestCase
     # lexicalConcept is a single value, not an array
     assert_equal concept.id, sense.lexicalConcept.id
 
-    # concept has prefLabel and definition; accept with or without '@en'
-    pref = concept.prefLabel.is_a?(Array) ? concept.prefLabel.first : concept.prefLabel
-    assert_includes ['Test concept', 'Test concept@en'], pref.to_s
+    # concept has definition (but NOT prefLabel - LexicalConcepts don't have prefLabel in OntoLex)
     defn_vals = concept.definition.is_a?(Array) ? concept.definition : [concept.definition]
     assert defn_vals.compact.map(&:to_s).any? { |v| v == 'A simple concept' || v == 'A simple concept@en' }
   end
@@ -352,5 +350,106 @@ class TestOntoLexParser < LinkedData::TestCase
     result = parser.parse
     expected_output = File.join(File.dirname(file_path), "ontolex_triples.ttl")
     assert_equal expected_output, result, "Parser wrapper parse() should return output path"
+  end
+
+  def test_mapping_triples_generation
+    # Test that LOOM and SAME_URI mapping triples are generated for OntoLex LexicalEntries
+    # Note: LexicalConcepts are not included since they don't have prefLabel
+    file_path = File.expand_path('../data/ontolex/sample.ttl', __dir__)
+    
+    delete_ontologies_and_submissions
+    u, of, contact = ontology_objects
+    
+    # Find the ONTOLEX format
+    ontolex_format = LinkedData::Models::OntologyFormat.find("ONTOLEX").first
+    format_to_use = ontolex_format || of
+    
+    ont = LinkedData::Models::Ontology.new(acronym: 'ONTOLEXMAP', name: "OntoLex Mapping Test", administeredBy: [u])
+    ont.summaryOnly = true
+    ont.save
+    
+    sub = LinkedData::Models::OntologySubmission.new(
+      ontology: ont,
+      hasOntologyLanguage: format_to_use,
+      submissionId: 1,
+      contact: [contact],
+      released: DateTime.now - 1,
+      definitionProperty: RDF::IRI.new("http://bioontology.org/ontologies/biositemap.owl#definition")
+    )
+    sub.save
+    sub.pullLocation = RDF::IRI.new("file://#{file_path}")
+    sub.save
+    
+    # Parse the OntoLex file
+    result = LinkedData::Parser::OntoLex.parse(file_path.to_s, sub)
+    
+    # Verify we have entries (mappings are only generated for entries, not concepts)
+    refute_nil result[:entries], "Should have entries"
+    assert result[:entries].length > 0, "Should have at least one entry"
+    
+    # Query the triple store for mapping predicates
+    graph_id = sub.id.to_s
+    client = Goo.sparql_query_client(:main)
+    
+    loom_predicate = Goo.vocabulary(:metadata_def)[:mappingLoom].to_s
+    same_uri_predicate = Goo.vocabulary(:metadata_def)[:mappingSameURI].to_s
+    
+    # Check for LOOM mapping triples
+    loom_query = <<-SPARQL
+      SELECT (COUNT(?s) as ?count) WHERE {
+        GRAPH <#{graph_id}> {
+          ?s <#{loom_predicate}> ?loom_label .
+        }
+      }
+    SPARQL
+    
+    loom_count = 0
+    client.query(loom_query).each do |row|
+      loom_count = row[:count].to_i
+    end
+    
+    puts "\n[MAPPING DEBUG] LOOM mapping triples count: #{loom_count}"
+    
+    # Check for SAME_URI mapping triples
+    same_uri_query = <<-SPARQL
+      SELECT (COUNT(?s) as ?count) WHERE {
+        GRAPH <#{graph_id}> {
+          ?s <#{same_uri_predicate}> ?uri .
+        }
+      }
+    SPARQL
+    
+    same_uri_count = 0
+    client.query(same_uri_query).each do |row|
+      same_uri_count = row[:count].to_i
+    end
+    
+    puts "[MAPPING DEBUG] SAME_URI mapping triples count: #{same_uri_count}"
+    
+    # We should have SAME_URI mapping for each entry only (concepts are not included)
+    expected_same_uri_count = result[:entries].length
+    assert_equal expected_same_uri_count, same_uri_count, 
+      "Should have SAME_URI mapping for each entry (#{expected_same_uri_count} expected)"
+    
+    # LOOM mappings depend on having lemma with > 2 chars
+    assert loom_count > 0, "Should have at least one LOOM mapping triple"
+    
+    # Verify the actual values
+    loom_values_query = <<-SPARQL
+      SELECT ?s ?loom WHERE {
+        GRAPH <#{graph_id}> {
+          ?s <#{loom_predicate}> ?loom .
+        }
+      }
+    SPARQL
+    
+    puts "[MAPPING DEBUG] LOOM mappings:"
+    client.query(loom_values_query).each do |row|
+      puts "  #{row[:s]} -> #{row[:loom]}"
+      # Verify LOOM label is lowercase and alphanumeric only
+      loom_val = row[:loom].to_s
+      assert loom_val == loom_val.downcase, "LOOM label should be lowercase"
+      assert loom_val.match?(/^[a-z0-9]+$/), "LOOM label should be alphanumeric only"
+    end
   end
 end

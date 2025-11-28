@@ -56,7 +56,10 @@ module LinkedData
         }, uri_type),
                 LinkedData::Hypermedia::Link.new('ontology', lambda { |s|
                   "ontologies/#{s.submission.ontology.acronym}"
-                }, Goo.vocabulary['Ontology'])
+                }, Goo.vocabulary['Ontology']),
+                LinkedData::Hypermedia::Link.new('mappings', lambda { |s|
+                  "ontologies/#{s.submission.ontology.acronym}/lexical_entries/#{CGI.escape(s.id.to_s)}/mappings"
+                }, Goo.vocabulary[:metadata]['Mapping'])
 
         # Grant access to all users for OntoLex entities
         grant_access_to_all true
