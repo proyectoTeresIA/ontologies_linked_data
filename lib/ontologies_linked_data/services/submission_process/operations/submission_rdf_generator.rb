@@ -180,6 +180,12 @@ module LinkedData
         fsave_mappings = File.open(artifacts[:save_in_file_mappings], "w")
         artifacts[:fsave] = fsave
         artifacts[:fsave_mappings] = fsave_mappings
+        
+        # Check if this is an OntoLex ontology - if so, skip mapping generation here
+        # because the OntoLex parser handles mapping triples specifically for LexicalEntries
+        @submission.bring(:hasOntologyLanguage) if @submission.bring?(:hasOntologyLanguage)
+        artifacts[:is_ontolex] = @submission.hasOntologyLanguage && 
+                                  @submission.hasOntologyLanguage.id.to_s.include?('ONTOLEX')
       end
 
       def generate_missing_labels_pre_page(artifacts = {}, logger, paging, page_classes, page)
@@ -231,7 +237,9 @@ module LinkedData
           prefLabel = LinkedData::Utils::Triples.last_iri_fragment c.id.to_s
         end
 
-        if @submission.ontology.viewOf.nil?
+        # Skip mapping triple generation for OntoLex ontologies - the OntoLex parser
+        # handles this specifically for LexicalEntries (not concepts or other classes)
+        if @submission.ontology.viewOf.nil? && !artifacts[:is_ontolex]
           loomLabel = LinkedData::Models::OntologySubmission.loom_transform_literal(prefLabel.to_s)
 
           if loomLabel.length > 2

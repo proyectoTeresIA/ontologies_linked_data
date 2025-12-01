@@ -124,6 +124,11 @@ eos
       graphs << sub2.id unless sub2.nil?
 
       if sub2.nil?
+        # When searching for mappings to ANY other ontology, we need access to ALL
+        # latest submission graphs, not just sub1's graph.
+        latest_sub_ids.each_value do |sub_uri|
+          graphs << RDF::URI.new(sub_uri) unless sub_uri == sub1.id.to_s
+        end
         solutions = epr.query(query, graphs: graphs, reload_cache: reload_cache)
 
         solutions.each do |sol|

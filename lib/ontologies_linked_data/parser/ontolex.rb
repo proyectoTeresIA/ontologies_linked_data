@@ -968,9 +968,35 @@ module LinkedData
             return
           end
 
-          mapping_triples = []
           mapping_loom_predicate = Goo.vocabulary(:metadata_def)[:mappingLoom]
           mapping_same_uri_predicate = Goo.vocabulary(:metadata_def)[:mappingSameURI]
+          
+          # First, delete any existing mapping triples to ensure we only have LexicalEntry mappings
+          # This cleans up any incorrect triples that may have been generated for concepts
+          begin
+            delete_query = <<-SPARQL
+DELETE WHERE {
+  GRAPH <#{submission.id}> {
+    ?s <#{mapping_loom_predicate}> ?o .
+  }
+}
+            SPARQL
+            Goo.sparql_update_client.update(delete_query)
+            
+            delete_query = <<-SPARQL
+DELETE WHERE {
+  GRAPH <#{submission.id}> {
+    ?s <#{mapping_same_uri_predicate}> ?o .
+  }
+}
+            SPARQL
+            Goo.sparql_update_client.update(delete_query)
+            warn('[OntoLex] Cleared existing mapping triples')
+          rescue StandardError => e
+            warn("[OntoLex] Failed to clear existing mapping triples: #{e.message}")
+          end
+
+          mapping_triples = []
           
           # Query for all entries and their form writtenReps directly from triple store
           # This is more reliable than navigating through objects since forms may not be fully loaded
