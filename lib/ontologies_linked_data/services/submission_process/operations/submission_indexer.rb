@@ -37,7 +37,89 @@ module LinkedData
           is_ontolex = LinkedData::Models::OntoLex::LexicalEntry.in(@submission).page(1, 1).all.any?
 
           if is_ontolex
-            logger.info("Detected OntoLex ontology: #{@submission.ontology.acronym}. Skipping class/property indexing.")
+            logger.info("Detected OntoLex ontology: #{@submission.ontology.acronym}. Generating CSV for lexical entries...")
+            
+            # Generate CSV file for OntoLex entries
+            csv_writer = LinkedData::Utils::OntoLexCSVWriter.new
+            csv_writer.open(@submission.csv_path)
+
+            begin
+              page = 1
+              size = 500
+              paging = LinkedData::Models::OntoLex::LexicalEntry.in(@submission)
+                                                                .include(:lemma, :language, :partOfSpeech)
+                                                                .page(page, size)
+              
+              entries = paging.all
+              entry_count = 0
+              while entries.any?
+                # For each entry, query forms and senses separately
+                entries.each do |entry|
+                  entry_count += 1
+                  
+                  # Query forms linked to this entry
+                  forms_query = <<-SPARQL
+                    SELECT ?form ?writtenRep
+                    WHERE {
+                      GRAPH <#{@submission.id}> {
+                        <#{entry.id}> <http://www.w3.org/ns/lemon/ontolex#form> ?form .
+                        ?form <http://www.w3.org/ns/lemon/ontolex#writtenRep> ?writtenRep .
+                      }
+                    }
+                  SPARQL
+                  
+                  entry.instance_variable_set(:@forms_data, [])
+                  begin
+                    Goo.sparql_query_client(:main).query(forms_query).each do |solution|
+                      entry.instance_variable_get(:@forms_data) << {
+                        writtenRep: solution[:writtenRep].to_s
+                      }
+                    end
+                  rescue => e
+                    logger.warn("Error querying forms for entry #{entry.id}: #{e.message}")
+                  end
+                  
+                  # Query senses linked to this entry
+                  senses_query = <<-SPARQL
+                    SELECT ?sense ?definition ?reference ?example
+                    WHERE {
+                      GRAPH <#{@submission.id}> {
+                        <#{entry.id}> <http://www.w3.org/ns/lemon/ontolex#sense> ?sense .
+                        OPTIONAL { ?sense <http://purl.org/dc/terms/definition> ?definition . }
+                        OPTIONAL { ?sense <http://www.w3.org/ns/lemon/ontolex#reference> ?reference . }
+                        OPTIONAL { ?sense <http://purl.org/dc/terms/example> ?example . }
+                      }
+                    }
+                  SPARQL
+                  
+                  entry.instance_variable_set(:@senses_data, [])
+                  begin
+                    Goo.sparql_query_client(:main).query(senses_query).each do |solution|
+                      entry.instance_variable_get(:@senses_data) << {
+                        definition: solution[:definition]&.to_s,
+                        reference: solution[:reference]&.to_s,
+                        example: solution[:example]&.to_s
+                      }
+                    end
+                  rescue => e
+                    logger.warn("Error querying senses for entry #{entry.id}: #{e.message}")
+                  end
+                  
+                  csv_writer.write_entry(entry)
+                end
+                
+                logger.info("Processed #{entry_count} entries for CSV generation...")
+                page += 1
+                entries = paging.page(page, size).all
+              end
+              
+              csv_writer.close
+              logger.info("CSV file generated for OntoLex ontology: #{@submission.csv_path} (#{entry_count} entries)")
+            rescue StandardError => e
+              csv_writer.close if csv_writer
+              logger.error("Error generating CSV for OntoLex: #{e.class}: #{e.message}\n#{e.backtrace.join("\n\t")}")
+              raise e
+            end
           else
             # Standard ontology - index classes
             csv_writer = LinkedData::Utils::OntologyCSVWriter.new

@@ -100,9 +100,10 @@ module LinkedData
           link_cross_references(graph, concepts_by_id, entries_by_id, senses_by_id, submission)
 
           # Generate mapping triples for LOOM and SAME_URI mappings
-          # This enables cross-ontology mapping discovery for OntoLex terminologies
-          # Note: Only LexicalEntries are processed (not concepts) since they have lexical forms
           generate_mapping_triples(entries, submission)
+
+          # Export RDF from triple store to file for download functionality
+          export_rdf_to_file(submission)
 
           {
             entries: entries,
@@ -950,6 +951,55 @@ module LinkedData
           end
 
           warn('[OntoLex] Second pass completed')
+        end
+
+        def export_rdf_to_file(submission)
+          warn('[OntoLex] Exporting RDF from triple store to file...')
+          
+          rdf_output_path = submission.rdf_path
+          
+          begin
+            # Query all triples from the submission graph and export to N-Triples format
+            query = "CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <#{submission.id}> { ?s ?p ?o } }"
+            
+            client = Goo.sparql_query_client(:main)
+            
+            # Write triples in N-Triples format
+            File.open(rdf_output_path, 'w') do |file|
+              solutions = client.query(query)
+              count = 0
+              solutions.each do |statement|
+                # Format as N-Triple: <subject> <predicate> <object> .
+                subj = statement[:s].to_s.start_with?('_:') ? statement[:s].to_s : "<#{statement[:s]}>"
+                pred = "<#{statement[:p]}>"
+                
+                if statement[:o].is_a?(RDF::URI)
+                  obj = "<#{statement[:o]}>"
+                elsif statement[:o].respond_to?(:language) && statement[:o].language
+                  # Literal with language tag
+                  obj_val = statement[:o].to_s.gsub('\\', '\\\\').gsub('"', '\\"').gsub("\n", '\\n').gsub("\r", '\\r')
+                  obj = "\"#{obj_val}\"@#{statement[:o].language}"
+                elsif statement[:o].respond_to?(:datatype) && statement[:o].datatype
+                  # Typed literal
+                  obj_val = statement[:o].to_s.gsub('\\', '\\\\').gsub('"', '\\"').gsub("\n", '\\n').gsub("\r", '\\r')
+                  obj = "\"#{obj_val}\"^^<#{statement[:o].datatype}>"
+                else
+                  # Plain literal
+                  obj_val = statement[:o].to_s.gsub('\\', '\\\\').gsub('"', '\\"').gsub("\n", '\\n').gsub("\r", '\\r')
+                  obj = "\"#{obj_val}\""
+                end
+                
+                file.write("#{subj} #{pred} #{obj} .\n")
+                count += 1
+              end
+              warn("[OntoLex] Exported #{count} triples to RDF file")
+            end
+            
+            warn("[OntoLex] RDF exported successfully to #{rdf_output_path}")
+          rescue StandardError => e
+            warn("[OntoLex] Failed to export RDF to file: #{e.message}")
+            warn("[OntoLex] Backtrace: #{e.backtrace.join("\n")}")
+          end
         end
 
         # Generate mapping triples for LOOM (lexical matching) and SAME_URI mappings
