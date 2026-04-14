@@ -655,6 +655,12 @@ module LinkedData
         remove_index = options[:remove_index] ? true : false
         index_commit = options[:index_commit] == false ? false : true
 
+        begin
+          Goo.sparql_data_client.delete_graph(self.id)
+        rescue StandardError => e
+          LinkedData::Parser.logger&.warn("Failed to delete submission graph #{self.id}: #{e.message}")
+        end
+
         super(*args)
         self.ontology.unindex(index_commit)
         self.ontology.unindex_properties(index_commit)

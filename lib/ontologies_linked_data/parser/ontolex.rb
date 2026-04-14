@@ -4,6 +4,7 @@ require 'rdf/ntriples'
 require 'addressable/uri'
 require 'cgi'
 require 'set'
+require 'tempfile'
 
 module LinkedData
   module Parser
@@ -64,6 +65,8 @@ module LinkedData
           submission.bring(:ontology) if submission.respond_to?(:bring) && !submission.ontology
 
           graph = load_graph(rdf_source)
+          sync_submission_graph(graph, submission)
+
           warn("[OntoLex] Graph statements: #{graph.count}")
           begin
             types = graph.query(predicate: RDF.type).objects.uniq.map(&:to_s)
@@ -175,6 +178,23 @@ module LinkedData
 
           warn("[OntoLex] Loaded #{graph.count} statements")
           graph
+        end
+
+        def sync_submission_graph(graph, submission)
+          warn("[OntoLex] Syncing full source graph into submission graph #{submission.id}")
+          tmp_file = Tempfile.new(['ontolex_source_graph', '.nt'])
+          begin
+            tmp_file.write(graph.dump(:ntriples))
+            tmp_file.flush
+
+            Goo.sparql_data_client.delete_graph(submission.id)
+            Goo.sparql_data_client.put_triples(submission.id, tmp_file.path, 'application/n-triples')
+
+            warn("[OntoLex] Submission graph synchronized with #{graph.count} source triples")
+          ensure
+            tmp_file.close
+            tmp_file.unlink
+          end
         end
 
         def index_definitions(graph, submission)
