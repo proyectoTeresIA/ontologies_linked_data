@@ -280,29 +280,60 @@ module LinkedData
         def self.expand_lexical_conceptual_resource(resource_obj, submission)
           return resource_obj.to_s unless resource_obj.is_a?(RDF::URI) || resource_obj.is_a?(String)
 
-          predicate_overrides = {
-            'resourceName' => 'http://w3id.org/meta-share/meta-share/2.0.0/resourceName',
-            'resourceCreator' => 'http://w3id.org/meta-share/meta-share/2.0.0/resourceCreator',
-            'language' => 'http://w3id.org/meta-share/meta-share/2.0.0/language',
-            'domain' => 'http://w3id.org/meta-share/meta-share/2.0.0/domain',
-            'uri' => 'http://w3id.org/meta-share/meta-share/2.0.0/uri'
-          }
+          predicate_override_sets = [
+            {
+              'resourceName' => 'http://w3id.org/meta-share/meta-share/2.0.0/resourceName',
+              'resourceCreator' => 'http://w3id.org/meta-share/meta-share/2.0.0/resourceCreator',
+              'language' => 'http://w3id.org/meta-share/meta-share/2.0.0/language',
+              'domain' => 'http://w3id.org/meta-share/meta-share/2.0.0/domain',
+              'uri' => 'http://w3id.org/meta-share/meta-share/2.0.0/uri',
+              'url' => 'http://w3id.org/meta-share/meta-share/2.0.0/url'
+            },
+            {
+              'resourceName' => 'http://w3id.org/meta-share/meta-share/resourceName',
+              'resourceCreator' => 'http://w3id.org/meta-share/meta-share/resourceCreator',
+              'language' => 'http://w3id.org/meta-share/meta-share/language',
+              'domain' => 'http://w3id.org/meta-share/meta-share/domain',
+              'uri' => 'http://w3id.org/meta-share/meta-share/uri',
+              'url' => 'http://w3id.org/meta-share/meta-share/url'
+            },
+            {
+              'resourceName' => 'https://w3id.org/meta-share/meta-share/2.0.0/resourceName',
+              'resourceCreator' => 'https://w3id.org/meta-share/meta-share/2.0.0/resourceCreator',
+              'language' => 'https://w3id.org/meta-share/meta-share/2.0.0/language',
+              'domain' => 'https://w3id.org/meta-share/meta-share/2.0.0/domain',
+              'uri' => 'https://w3id.org/meta-share/meta-share/2.0.0/uri',
+              'url' => 'https://w3id.org/meta-share/meta-share/2.0.0/url'
+            },
+            {
+              'resourceName' => 'https://w3id.org/meta-share/meta-share/resourceName',
+              'resourceCreator' => 'https://w3id.org/meta-share/meta-share/resourceCreator',
+              'language' => 'https://w3id.org/meta-share/meta-share/language',
+              'domain' => 'https://w3id.org/meta-share/meta-share/domain',
+              'uri' => 'https://w3id.org/meta-share/meta-share/uri',
+              'url' => 'https://w3id.org/meta-share/meta-share/url'
+            }
+          ]
 
           candidates = candidate_resource_uris(resource_obj, submission)
           result = nil
 
           candidates.each do |candidate_uri|
-            result = expand_auxiliary_entity(
-              candidate_uri,
-              submission,
-              'LexicalConceptualResource',
-              %w[resourceName uri resourceCreator language domain],
-              expand_refs: false,
-              predicate_overrides: predicate_overrides,
-              multivalued_fields: %w[resourceCreator language domain],
-              normalize_language_codes: false,
-              strict: true
-            )
+            predicate_override_sets.each do |predicate_overrides|
+              result = expand_auxiliary_entity(
+                candidate_uri,
+                submission,
+                'LexicalConceptualResource',
+                %w[resourceName uri url resourceCreator language domain],
+                expand_refs: false,
+                predicate_overrides: predicate_overrides,
+                multivalued_fields: %w[resourceCreator language domain],
+                normalize_language_codes: false,
+                strict: true
+              )
+              break if result.is_a?(Hash) && result['resourceName']
+            end
+
             break if result.is_a?(Hash) && result['resourceName']
           end
 
