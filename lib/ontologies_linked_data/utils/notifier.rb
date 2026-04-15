@@ -18,6 +18,8 @@ module LinkedData
           recipients = LinkedData.settings.email_override
         end
 
+        return false unless smtp_configured?
+
         Pony.mail({
                     to: recipients,
                     from: sender,
@@ -28,6 +30,11 @@ module LinkedData
                     enable_starttls_auto: LinkedData.settings.enable_starttls_auto,
                     via_options: mail_options
                   })
+      rescue StandardError => e
+        # Avoid breaking caller flows (e.g., password reset token creation)
+        # when SMTP is unreachable or misconfigured.
+        warn("[Notifier] Email delivery failed: #{e.class} #{e.message}")
+        false
       end
 
       def self.administrative_notifications_enabled?
@@ -107,7 +114,9 @@ module LinkedData
         options = {
           address: LinkedData.settings.smtp_host,
           port: LinkedData.settings.smtp_port,
-          domain: LinkedData.settings.smtp_domain # the HELO domain provided by the client to the server
+          domain: LinkedData.settings.smtp_domain, # the HELO domain provided by the client to the server
+          open_timeout: 5,
+          read_timeout: 5
         }
 
         if LinkedData.settings.smtp_auth_type && LinkedData.settings.smtp_auth_type != :none
@@ -119,6 +128,13 @@ module LinkedData
         end
 
         options
+      end
+
+      def self.smtp_configured?
+        smtp_host = LinkedData.settings.smtp_host
+        smtp_port = LinkedData.settings.smtp_port
+
+        !smtp_host.to_s.strip.empty? && !smtp_port.nil?
       end
     end
   end

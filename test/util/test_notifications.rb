@@ -241,7 +241,9 @@ class TestNotifications < LinkedData::TestCase
     expected_options = {
       address: LinkedData.settings.smtp_host,
       port: LinkedData.settings.smtp_port,
-      domain: LinkedData.settings.smtp_domain
+      domain: LinkedData.settings.smtp_domain,
+      open_timeout: 5,
+      read_timeout: 5
     }
     assert_equal options, expected_options
 
@@ -253,6 +255,8 @@ class TestNotifications < LinkedData::TestCase
       address: LinkedData.settings.smtp_host,
       port: LinkedData.settings.smtp_port,
       domain: LinkedData.settings.smtp_domain,
+      open_timeout: 5,
+      read_timeout: 5,
       user_name: LinkedData.settings.smtp_user,
       password: LinkedData.settings.smtp_password,
       authentication: LinkedData.settings.smtp_auth_type
@@ -260,5 +264,17 @@ class TestNotifications < LinkedData::TestCase
     assert_equal options, expected_options
 
     LinkedData.settings.smtp_auth_type = current_auth_type
+  end
+
+  def test_notify_does_not_raise_if_mail_delivery_fails
+    Pony.expects(:mail).raises(Net::OpenTimeout)
+
+    result = LinkedData::Utils::Notifier.notify(
+      recipients: ['test@example.org'],
+      subject: 'subject',
+      body: 'body'
+    )
+
+    assert_equal false, result
   end
 end
