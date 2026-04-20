@@ -419,10 +419,27 @@ module LinkedData
       end
 
       def delete_and_append(triples_file_path, logger, mime_type = nil)
-        Goo.sparql_data_client.delete_graph(@submission.id)
-        Goo.sparql_data_client.put_triples(@submission.id, triples_file_path, mime_type)
-        logger.info("Triples #{triples_file_path} appended in #{@submission.id.to_ntriples}")
-        logger.flush
+        max_retries = 3
+        attempt = 0
+        begin
+          attempt += 1
+          Goo.sparql_data_client.delete_graph(@submission.id)
+          Goo.sparql_data_client.put_triples(@submission.id, triples_file_path, mime_type)
+          logger.info("Triples #{triples_file_path} appended in #{@submission.id.to_ntriples}")
+          logger.flush
+        rescue RestClient::ExceptionWithResponse => e
+          body = e.response&.body rescue nil
+          logger.error("RestClient error when uploading triples (attempt #{attempt}/#{max_retries}): #{e.class}: #{e.message}")
+          logger.error("Response body: #{body}") if body
+          logger.flush
+          if attempt < max_retries
+            sleep_time = 2 ** attempt
+            logger.info("Retrying upload in #{sleep_time} seconds...")
+            sleep(sleep_time)
+            retry
+          end
+          raise e
+        end
       end
 
       def generate_obsolete_classes(logger, file_path)
