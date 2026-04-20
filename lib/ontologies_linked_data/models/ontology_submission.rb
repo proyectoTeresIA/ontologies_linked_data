@@ -703,6 +703,27 @@ module LinkedData
 
         if skos
           classes = skos_roots(concept_schemes, page, paged, pagesize)
+
+          # Some SKOS vocabularies are intentionally non-hierarchical for concepts.
+          # In that case, behave as a flat ontology at runtime to keep UI navigation usable.
+          if classes.empty?
+            data_query = LinkedData::Models::Class.in(self)
+
+            unless paged
+              page = 1
+              pagesize = FLAT_ROOTS_LIMIT
+              paged = true
+              fake_paged = true
+            end
+
+            if paged
+              classes = data_query.page(page, pagesize).disable_rules.all
+              classes = classes.to_a if fake_paged
+            else
+              classes = data_query.disable_rules.all
+            end
+          end
+
           extra_include += LinkedData::Models::Class.concept_is_in_attributes
         else
           self.ontology.bring(:flat)

@@ -8,6 +8,7 @@ module LinkedData
           class_ids, count = roots_by_has_top_concept(concept_schemes, page, paged, pagesize)
 
           class_ids, count = roots_by_top_concept_of(concept_schemes, page, paged, pagesize) if class_ids.empty?
+          class_ids, count = roots_by_no_broader(concept_schemes, page, paged, pagesize) if class_ids.empty?
 
           class_ids.each do |id|
             classes << LinkedData::Models::Class.find(id).in(self).disable_rules.first
@@ -56,6 +57,17 @@ module LinkedData
           roots_by_query query_body, page, paged, pagesize
         end
 
+        # Fallback for valid SKOS vocabularies that do not publish
+        # hasTopConcept/topConceptOf triples but do provide concept hierarchy.
+        def roots_by_no_broader(concept_schemes, page, paged, pagesize)
+          query_body = <<-eos
+            ?root a #{RDF::SKOS[:Concept].to_ntriples} .
+            FILTER NOT EXISTS { ?root #{RDF::SKOS[:broader].to_ntriples} ?parent . }
+            #{concept_schemes_filter_for_root(concept_schemes)}
+          eos
+          roots_by_query query_body, page, paged, pagesize
+        end
+
         def add_pagination(query_body, page, pagesize, root_skos)
           count = count_roots(query_body)
 
@@ -83,6 +95,12 @@ module LinkedData
           concept_schemes = current_schemes(concept_schemes)
           concept_schemes = concept_schemes.map { |x| RDF::URI.new(x.to_s).to_ntriples }
           concept_schemes.empty? ? '' : "FILTER (?x IN (#{concept_schemes.join(',')}))"
+        end
+
+        def concept_schemes_filter_for_root(concept_schemes)
+          concept_schemes = current_schemes(concept_schemes)
+          concept_schemes = concept_schemes.map { |x| RDF::URI.new(x.to_s).to_ntriples }
+          concept_schemes.empty? ? '' : "?root #{RDF::SKOS[:inScheme].to_ntriples} ?x . FILTER (?x IN (#{concept_schemes.join(',')}))"
         end
 
         def current_schemes(concept_schemes)
