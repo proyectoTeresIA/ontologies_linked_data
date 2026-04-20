@@ -8,7 +8,7 @@ module LinkedData
           class_ids, count = roots_by_has_top_concept(concept_schemes, page, paged, pagesize)
 
           class_ids, count = roots_by_top_concept_of(concept_schemes, page, paged, pagesize) if class_ids.empty?
-          class_ids, count = roots_by_no_broader(concept_schemes, page, paged, pagesize) if class_ids.empty?
+          # class_ids, count = roots_by_no_broader(concept_schemes, page, paged, pagesize) if class_ids.empty?
 
           class_ids.each do |id|
             classes << LinkedData::Models::Class.find(id).in(self).disable_rules.first
