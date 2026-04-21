@@ -21,7 +21,6 @@ module LinkedData
       include SKOS::RootsFetcher
 
       FLAT_ROOTS_LIMIT = 1000
-      SKOS_FALLBACK_ROOTS_LIMIT = 50
       # default file permissions for files copied from tempdir
       REPOSITORY_FILE_MODE = 0o660   # rw-rw----
       REPOSITORY_DIR_MODE  = 0o2770  # rwxrws--- + set-GID
@@ -701,7 +700,6 @@ module LinkedData
 
         skos = self.skos?
         classes = []
-        skos_flat_fallback = false
 
         if skos
           classes = skos_roots(concept_schemes, page, paged, pagesize)
@@ -709,12 +707,11 @@ module LinkedData
           # Some SKOS vocabularies are intentionally non-hierarchical for concepts.
           # In that case, behave as a flat ontology at runtime to keep UI navigation usable.
           if classes.empty?
-            skos_flat_fallback = true
             data_query = LinkedData::Models::Class.in(self)
 
             unless paged
               page = 1
-              pagesize = SKOS_FALLBACK_ROOTS_LIMIT
+              pagesize = FLAT_ROOTS_LIMIT
               paged = true
               fake_paged = true
             end
@@ -727,7 +724,7 @@ module LinkedData
             end
           end
 
-          extra_include += LinkedData::Models::Class.concept_is_in_attributes unless skos_flat_fallback
+          extra_include += LinkedData::Models::Class.concept_is_in_attributes
         else
           self.ontology.bring(:flat)
           data_query = nil
