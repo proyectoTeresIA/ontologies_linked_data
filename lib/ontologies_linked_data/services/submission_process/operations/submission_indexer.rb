@@ -214,7 +214,8 @@ module LinkedData
           RequestStore.store[:requested_lang] = :ALL
           # Unindex all lexical docs for this ontology
           @submission.ontology.bring(:acronym) if @submission.ontology.bring?(:acronym)
-          query = "submissionAcronym:#{@submission.ontology.acronym}"
+          escaped_acronym = @submission.ontology.acronym.to_s.gsub(/[\\"]/) { |m| "\\#{m}" }
+          query = "submissionAcronym:\"#{escaped_acronym}\""
           LinkedData::Models::Ontology.unindexByQuery(query, :lexical)
           LinkedData::Models::Ontology.indexCommit(nil, :lexical) if commit
 
