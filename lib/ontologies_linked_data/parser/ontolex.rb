@@ -180,6 +180,34 @@ module LinkedData
           graph
         end
 
+        # Detect whether the backend triple store is 4store.
+        # We inspect the data client's endpoint URL or class name for known identifiers.
+        def fourstore_backend?
+          return @_fourstore_backend unless @_fourstore_backend.nil?
+          client = Goo.sparql_data_client
+          endpoint = client.respond_to?(:url) ? client.url.to_s :
+                     (client.respond_to?(:instance_variable_get) ? client.instance_variable_get(:@url).to_s : '')
+          @_fourstore_backend = endpoint.include?('4store') ||
+                                client.class.name.to_s.downcase.include?('4store') ||
+                                begin
+                                  # Probe: 4store returns its version string on a SPARQL error
+                                  Goo.sparql_query_client(:main).query('SELECT * WHERE { ?s ?p ?o } LIMIT 0')
+                                  false
+                                rescue SPARQL::Client::ServerError => err
+                                  err.message.to_s.include?('4store')
+                                rescue StandardError
+                                  false
+                                end
+          @_fourstore_backend
+        end
+
+        def sparql_update_client
+          # Always use the dedicated update client for write operations.
+          # sparql_query_client(:main) is read-only on 4store and will return a
+          # ServerError object instead of raising, which breaks `.id` calls downstream.
+          Goo.sparql_update_client
+        end
+
         def sync_submission_graph(graph, submission)
           warn("[OntoLex] Syncing full source graph into submission graph #{submission.id}")
           tmp_file = Tempfile.new(['ontolex_source_graph', '.nt'])
@@ -188,7 +216,22 @@ module LinkedData
             tmp_file.flush
 
             Goo.sparql_data_client.delete_graph(submission.id)
-            Goo.sparql_data_client.put_triples(submission.id, tmp_file.path, 'application/n-triples')
+
+            if fourstore_backend?
+              # 4store does not support PUT to a named graph via the data client.
+              # Use SPARQL UPDATE (INSERT DATA) in batches instead.
+              warn("[OntoLex] 4store backend detected: loading graph via SPARQL UPDATE")
+              batch_size = 500
+              statements = graph.to_a
+              statements.each_slice(batch_size).with_index do |batch, idx|
+                nt_lines = batch.map { |st| st.to_ntriples }.join("\n")
+                insert_query = "INSERT DATA { GRAPH <#{submission.id}> {\n#{nt_lines}\n} }"
+                sparql_update_client.update(insert_query)
+                warn("[OntoLex] Inserted batch #{idx + 1} (#{batch.size} triples)")
+              end
+            else
+              Goo.sparql_data_client.put_triples(submission.id, tmp_file.path, 'application/n-triples')
+            end
 
             warn("[OntoLex] Submission graph synchronized with #{graph.count} source triples")
           ensure
@@ -568,7 +611,7 @@ module LinkedData
                 concept_uri = id
                 top_concept_predicate = RDF::URI('http://www.w3.org/2004/02/skos/core#isTopConceptOf')
 
-                client = Goo.sparql_query_client(:main)
+                client = sparql_update_client
                 top_concept_array = top_concept_of.is_a?(Array) ? top_concept_of : [top_concept_of]
                 top_concept_array.each do |tc|
                   insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{concept_uri}> <#{top_concept_predicate}> <#{tc}> } }"
@@ -865,35 +908,30 @@ module LinkedData
                 sense_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#sense')
                 signed_form_predicate = RDF::URI('https://w3id.org/def/easytv#signedForm')
 
-                client = Goo.sparql_query_client(:main)
+                update_client = sparql_update_client
 
-                forms.each do |form|
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{entry_uri}> <#{form_predicate}> <#{form.id}> } }"
-                  begin
-                    client.update(insert_query)
-                    warn("[OntoLex] Manually inserted form triple: #{entry_uri} -> #{form.id}")
-                  rescue StandardError => e
-                    warn("[OntoLex] Failed to insert form triple: #{e.message}")
-                  end
-                end
+                # Batch all triples for this entry into a single INSERT DATA to reduce round-trips
+                # (important for 4store which has a high per-request overhead)
+                triple_lines = []
+                forms.each { |form| triple_lines << "<#{entry_uri}> <#{form_predicate}> <#{form.id}> ." }
+                linked_senses.each { |sense| triple_lines << "<#{entry_uri}> <#{sense_predicate}> <#{sense.id}> ." }
+                signed_forms_list.each { |sf| triple_lines << "<#{entry_uri}> <#{signed_form_predicate}> <#{sf.id}> ." }
 
-                linked_senses.each do |sense|
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{entry_uri}> <#{sense_predicate}> <#{sense.id}> } }"
+                unless triple_lines.empty?
+                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { #{triple_lines.join(' ')} } }"
                   begin
-                    client.update(insert_query)
-                    warn("[OntoLex] Manually inserted sense triple: #{entry_uri} -> #{sense.id}")
-                  rescue StandardError => e
-                    warn("[OntoLex] Failed to insert sense triple: #{e.message}")
-                  end
-                end
-
-                signed_forms_list.each do |sf|
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{entry_uri}> <#{signed_form_predicate}> <#{sf.id}> } }"
-                  begin
-                    client.update(insert_query)
-                    warn("[OntoLex] Manually inserted signedForm triple: #{entry_uri} -> #{sf.id}")
-                  rescue StandardError => e
-                    warn("[OntoLex] Failed to insert signedForm triple: #{e.message}")
+                    update_client.update(insert_query)
+                    warn("[OntoLex] Inserted #{triple_lines.size} triples for entry #{entry_uri}")
+                  rescue StandardError => insert_err
+                    warn("[OntoLex] Batch insert failed for entry #{entry_uri}: #{insert_err.message}")
+                    # Fall back to one-by-one inserts so partial data is preserved
+                    triple_lines.each do |triple|
+                      begin
+                        update_client.update("INSERT DATA { GRAPH <#{graph_uri}> { #{triple} } }")
+                      rescue StandardError => single_err
+                        warn("[OntoLex] Failed to insert triple '#{triple}': #{single_err.message}")
+                      end
+                    end
                   end
                 end
 
@@ -939,26 +977,33 @@ module LinkedData
               isEvokedBy_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#isEvokedBy')
               lexicalizedSense_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#lexicalizedSense')
 
-              client = Goo.sparql_query_client(:main)
+              update_client = sparql_update_client
+              triple_lines = []
 
               if concept.isEvokedBy && !concept.isEvokedBy.empty?
                 concept.isEvokedBy.each do |entry|
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{concept_uri}> <#{isEvokedBy_predicate}> <#{entry.id}> } }"
-                  begin
-                    client.update(insert_query)
-                  rescue StandardError => e
-                    warn("[OntoLex] Failed to insert isEvokedBy triple: #{e.message}")
-                  end
+                  triple_lines << "<#{concept_uri}> <#{isEvokedBy_predicate}> <#{entry.id}> ."
                 end
               end
 
               if concept.lexicalizedSense && !concept.lexicalizedSense.empty?
                 concept.lexicalizedSense.each do |sense|
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{concept_uri}> <#{lexicalizedSense_predicate}> <#{sense.id}> } }"
-                  begin
-                    client.update(insert_query)
-                  rescue StandardError => e
-                    warn("[OntoLex] Failed to insert lexicalizedSense triple: #{e.message}")
+                  triple_lines << "<#{concept_uri}> <#{lexicalizedSense_predicate}> <#{sense.id}> ."
+                end
+              end
+
+              unless triple_lines.empty?
+                insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { #{triple_lines.join(' ')} } }"
+                begin
+                  update_client.update(insert_query)
+                rescue StandardError => batch_err
+                  warn("[OntoLex] Batch insert failed for concept #{concept_uri}: #{batch_err.message}")
+                  triple_lines.each do |triple|
+                    begin
+                      update_client.update("INSERT DATA { GRAPH <#{graph_uri}> { #{triple} } }")
+                    rescue StandardError => single_err
+                      warn("[OntoLex] Failed to insert triple '#{triple}': #{single_err.message}")
+                    end
                   end
                 end
               end
