@@ -19,18 +19,9 @@ module LinkedData
 
       def parse
         @logger&.info("Starting OntoLex parsing from #{@file_path}")
-
-        # The output will be a Turtle file in the same directory
         output_path = File.join(File.dirname(@file_path), 'ontolex_triples.ttl')
-
-        # Parse the OntoLex file and save to triple store
         OntoLex.parse(@file_path, @submission)
-
         @logger&.info('OntoLex parsing completed')
-
-        # Return the output path for the RDF generator to use
-        # Since OntoLex.parse saves directly to triple store, we return the original file
-        # The RDF generator will skip the upload step for OntoLex
         output_path
       end
     end
@@ -57,140 +48,241 @@ module LinkedData
         RDF::URI('https://www.w3.org/1999/02/22-rdf-syntax-ns#type')
       ]
 
+      # ---------------------------------------------------------------------------
+      # Batch insert size constants
+      # ---------------------------------------------------------------------------
+      SYNC_BATCH_SIZE    = 2000   # triples per INSERT DATA in sync_submission_graph
+      MAPPING_BATCH_SIZE = 1000   # triples per INSERT DATA in generate_mapping_triples
+
       class << self
         def parse(rdf_source, submission, options = {})
           raise ArgumentError, 'submission is required' unless submission
-
-          # Ensure submission is properly loaded with all necessary attributes
           submission.bring(:ontology) if submission.respond_to?(:bring) && !submission.ontology
 
           graph = load_graph(rdf_source)
           sync_submission_graph(graph, submission)
 
-          warn("[OntoLex] Graph statements: #{graph.count}")
-          begin
-            types = graph.query(predicate: RDF.type).objects.uniq.map(&:to_s)
-            warn("[OntoLex] RDF.type objects: #{types.join(', ')}")
-          rescue StandardError
-          end
-          warn("[OntoLex] SKOS Concept subjects: #{subjects_of_type(graph, SKOS.Concept).size}")
-          warn("[OntoLex] LexicalConcept subjects: #{subjects_of_type(graph, ONTOLEX.LexicalConcept).size}")
-          warn("[OntoLex] LexicalEntry subjects: #{subjects_of_type(graph, ONTOLEX.LexicalEntry).size}")
-          warn("[OntoLex] LexicalSense subjects: #{subjects_of_type(graph, ONTOLEX.LexicalSense).size}")
-          warn("[OntoLex] Form subjects: #{subjects_of_type(graph, ONTOLEX.Form).size}")
+          # Build in-memory indices once — avoids O(n) graph scans per lookup
+          @type_index  = build_type_index(graph)
+          @prop_index  = build_prop_index(graph)
+
+          warn("[OntoLex] Graph: #{graph.count} triples | " \
+               "SKOSConcepts=#{type_subjects(SKOS.Concept).size} " \
+               "LexicalConcepts=#{type_subjects(ONTOLEX.LexicalConcept).size} " \
+               "LexicalEntries=#{type_subjects(ONTOLEX.LexicalEntry).size} " \
+               "LexicalSenses=#{type_subjects(ONTOLEX.LexicalSense).size} " \
+               "Forms=#{type_subjects(ONTOLEX.Form).size}")
 
           # Parse auxiliary entities first so they exist when main entities reference them
-          references = index_references(graph, submission)
-          activities = index_activities(graph, submission)
-          agents = index_agents(graph, submission)
-          definitions = index_definitions(graph, submission)
-          notes = index_notes(graph, submission)
-          usage_examples = index_usage_examples(graph, submission)
-          usages = index_usages(graph, submission)
-          videos_by_id = index_videos(graph, submission)
+          references        = index_references(graph, submission)
+          activities        = index_activities(graph, submission)
+          agents            = index_agents(graph, submission)
+          definitions       = index_definitions(graph, submission)
+          notes             = index_notes(graph, submission)
+          usage_examples    = index_usage_examples(graph, submission)
+          usages            = index_usages(graph, submission)
+          videos_by_id      = index_videos(graph, submission)
           signed_forms_by_id = index_signed_forms(graph, submission, videos_by_id)
 
-          # Parse SKOS Concepts as Class objects (these are subjects for LexicalConcepts)
           skos_concepts_by_id, skos_concepts = index_skos_concepts(graph, submission)
+          concepts_by_id, concepts           = index_concepts(graph, submission, skos_concepts_by_id)
+          forms             = index_forms(graph, submission)
+          senses_by_id, senses               = index_senses(graph, submission, concepts_by_id)
+          entries_by_id, entries             = index_entries(graph, submission, forms, senses_by_id, concepts_by_id, signed_forms_by_id)
 
-          # Parse OntoLex LexicalConcepts
-          concepts_by_id, concepts = index_concepts(graph, submission, skos_concepts_by_id)
-          forms = index_forms(graph, submission)
-          senses_by_id, senses = index_senses(graph, submission, concepts_by_id)
-          entries_by_id, entries = index_entries(graph, submission, forms, senses_by_id, concepts_by_id, signed_forms_by_id)
-
-          # Second pass: link cross-references now that all objects exist
           link_cross_references(graph, concepts_by_id, entries_by_id, senses_by_id, submission)
-
-          # Generate mapping triples for LOOM and SAME_URI mappings
-          # This enables cross-ontology mapping discovery for OntoLex terminologies
-          # Note: Only LexicalEntries are processed (not concepts) since they have lexical forms
           generate_mapping_triples(entries, submission)
 
           {
-            entries: entries,
-            senses: senses_by_id,
-            concepts: concepts,
-            forms: forms,
-            definitions: definitions,
-            notes: notes,
-            usage_examples: usage_examples,
-            usages: usages,
-            signed_forms: signed_forms_by_id,
-            videos: videos_by_id,
-            references: references,
-            activities: activities,
-            agents: agents,
+            entries: entries, senses: senses_by_id, concepts: concepts, forms: forms,
+            definitions: definitions, notes: notes, usage_examples: usage_examples,
+            usages: usages, signed_forms: signed_forms_by_id, videos: videos_by_id,
+            references: references, activities: activities, agents: agents,
             skos_concepts: skos_concepts
           }
+        ensure
+          # Free the in-memory indices after parse
+          @type_index = nil
+          @prop_index = nil
         end
+
+        # ---------------------------------------------------------------------------
+        # In-memory graph index builders
+        # ---------------------------------------------------------------------------
+
+        # Build {type_uri_string => Set<subject>}  from a single rdf:type scan
+        def build_type_index(graph)
+          idx = Hash.new { |h, k| h[k] = Set.new }
+          type_preds = Set.new(RDF_TYPE.map(&:to_s)) << RDF.type.to_s
+          graph.each_statement do |st|
+            idx[st.object.to_s] << st.subject if type_preds.include?(st.predicate.to_s)
+          end
+          idx
+        end
+
+        # Build {subject_string => {predicate_string => [objects]}}  from one full scan
+        def build_prop_index(graph)
+          idx = Hash.new { |h, k| h[k] = Hash.new { |h2, k2| h2[k2] = [] } }
+          type_preds = Set.new(RDF_TYPE.map(&:to_s)) << RDF.type.to_s
+          graph.each_statement do |st|
+            next if type_preds.include?(st.predicate.to_s)
+            idx[st.subject.to_s][st.predicate.to_s] << st.object
+          end
+          idx
+        end
+
+        # Return subjects for a given RDF type (uses @type_index)
+        def type_subjects(type_uri)
+          @type_index ? @type_index[conv_uri(type_uri).to_s] : subjects_of_type_slow(nil, type_uri)
+        end
+
+        # ---------------------------------------------------------------------------
+        # Fast O(1) property lookups using @prop_index
+        # ---------------------------------------------------------------------------
+
+        def idx_values(subject, predicate)
+          return nil unless @prop_index
+          vals = @prop_index[subject.to_s][conv_uri(predicate).to_s]
+          return nil if vals.empty?
+          vals.length == 1 ? vals.first : vals
+        end
+
+        def idx_ref_values(subject, predicate)
+          return nil unless @prop_index
+          vals = @prop_index[subject.to_s][conv_uri(predicate).to_s].select { |o| o.is_a?(RDF::URI) }
+          vals.empty? ? nil : vals
+        end
+
+        # ---------------------------------------------------------------------------
+        # Bulk save helpers
+        # ---------------------------------------------------------------------------
+
+        # Validate and persist a collection of Goo objects in a single batch.
+        #
+        # Strategy:
+        #   1. Run field-level validation on each object WITHOUT calling exist?
+        #      (which does a SPARQL round-trip per object). We know these are new
+        #      objects from a fresh parse so duplicates are impossible.
+        #   2. Call Goo::SPARQL::Triples.model_update_triples on each valid object
+        #      to obtain an RDF::Graph of the triples to insert — this is the same
+        #      code path that save() uses internally, minus the network call.
+        #   3. Accumulate all triples into one RDF::Graph and flush to the triple
+        #      store in SYNC_BATCH_SIZE batches via a single code path that works
+        #      for both 4store and AllegroGraph.
+        #   4. Mark all objects @persistent = true so downstream code can call
+        #      .id on them safely.
+        def bulk_save(objects, submission, label)
+          return if objects.empty?
+
+          valid_objects  = []
+          combined_graph = RDF::Graph.new
+
+          objects.each do |obj|
+            # Ensure modified_attributes is populated (needed by model_update_triples)
+            obj.instance_variable_set(:@persistent, false)
+
+            # Apply defaults the same way save() does, so model_update_triples
+            # picks them up via modified_attributes
+            obj.class.attributes_with_defaults.each do |attr|
+              if obj.instance_variable_get("@#{attr}").nil?
+                obj.send("#{attr}=", obj.class.default(attr).call(obj))
+              end
+            end
+
+            # Field-level validation only — no exist? SPARQL call
+            validation_errors = {}
+            obj.class.attributes.each do |attr|
+              inst_value = obj.instance_variable_get("@#{attr}")
+              errs = Goo::Validators::Enforce.enforce(obj, attr, inst_value)
+              validation_errors[attr] = errs unless errs.nil?
+            end
+
+            unless validation_errors.empty?
+              warn("[OntoLex] #{label} #{obj.id} invalid, skipping: #{validation_errors}")
+              next
+            end
+
+            graph_insert, _graph_delete = Goo::SPARQL::Triples.model_update_triples(obj)
+            graph_insert.each_statement { |st| combined_graph << st } if graph_insert
+
+            valid_objects << obj
+          end
+
+          return if valid_objects.empty?
+
+          upload_graph(combined_graph, submission)
+
+          # Mark persistent so downstream .id calls and bring? checks work
+          valid_objects.each do |obj|
+            obj.instance_variable_set(:@persistent, true)
+            obj.instance_variable_set(:@modified_attributes, Set.new)
+            obj.instance_variable_set(:@loaded_attributes,
+              Set.new(obj.class.attributes).union(obj.loaded_attributes))
+          end
+
+          warn("[OntoLex] Bulk saved #{valid_objects.size} #{label} objects " \
+               "(#{combined_graph.count} triples)")
+        end
+
+        # Upload an RDF::Graph to the submission named graph.
+        # Uses INSERT DATA for both backends — no regex parsing, no format mismatch.
+        def upload_graph(graph, submission)
+          return if graph.empty?
+
+          statements = graph.to_a
+          statements.each_slice(SYNC_BATCH_SIZE) do |batch|
+            nt_body = batch.map(&:to_ntriples).join("\n")
+            sparql_update_client.update(
+              "INSERT DATA { GRAPH <#{submission.id}> {\n#{nt_body}\n} }"
+            )
+          end
+        end
+
+        # ---------------------------------------------------------------------------
+        # Graph loading
+        # ---------------------------------------------------------------------------
 
         def load_graph(rdf_source)
           warn("[OntoLex] Loading RDF from source: #{rdf_source}")
           ext = rdf_source.is_a?(String) ? File.extname(rdf_source).downcase : nil
-
-          # Use the lower-level approach that works - similar to the original load_graph method
           graph = RDF::Graph.new
 
-          if File.file?(rdf_source)
-            content = File.read(rdf_source)
-            warn("[OntoLex] Read #{content.bytesize} bytes from file")
+          raise ArgumentError, "Source must be a file path: #{rdf_source}" unless File.file?(rdf_source)
 
-            case ext
-            when '.nt', '.ntriples'
-              warn('[OntoLex] Parsing as N-Triples')
-              reader = RDF::NTriples::Reader.new(content)
-              reader.each_statement { |st| graph << st }
-            when '.ttl', '.turtle'
-              warn('[OntoLex] Parsing as Turtle')
-              # RDF 1.0.x has a bug with TTL base_uri handling that causes join errors
-              # Workaround: Convert TTL to N-Triples using external parser then parse
-              # TODO: Update GOO gem to use RDF 3.x which fixes this issue
-              success = false
+          content = File.read(rdf_source)
+          warn("[OntoLex] Read #{content.bytesize} bytes")
 
-              unless success
-                begin
-                  nt_content = `rapper -i turtle -o ntriples "#{rdf_source}" 2>/dev/null`
-                  if $?.success? && !nt_content.empty?
-                    warn("[OntoLex] Converted TTL to N-Triples using rapper: #{nt_content.lines.count} lines")
-                    reader = RDF::NTriples::Reader.new(nt_content)
-                    reader.each_statement { |st| graph << st }
-                    warn('[OntoLex] TTL converted and parsed successfully')
-                    success = true
-                  end
-                rescue StandardError => e
-                  warn("[OntoLex] rapper failed: #{e.message}")
-                end
-              end
-
-              unless success
-                warn('[OntoLex] All TTL conversion tools failed')
-                raise StandardError.new("Unable to parse TTL file: #{rdf_source}. RDF 1.0.x has TTL parsing issues.")
-              end
+          case ext
+          when '.nt', '.ntriples'
+            RDF::NTriples::Reader.new(content) { |r| r.each_statement { |st| graph << st } }
+          when '.ttl', '.turtle'
+            nt_content = `rapper -i turtle -o ntriples "#{rdf_source}" 2>/dev/null`
+            if $?.success? && !nt_content.empty?
+              warn("[OntoLex] Converted TTL→NTriples: #{nt_content.lines.count} lines")
+              RDF::NTriples::Reader.new(nt_content) { |r| r.each_statement { |st| graph << st } }
             else
-              warn("[OntoLex] Unknown format: #{ext}")
-              raise StandardError.new("Unsupported file format: #{ext}. Only .nt, .ntriples, .ttl, .turtle are supported.")
+              raise StandardError, "Unable to parse TTL file via rapper: #{rdf_source}"
             end
           else
-            warn("[OntoLex] Source is not a file: #{rdf_source}")
-            raise ArgumentError.new("Source must be a file path: #{rdf_source}")
+            raise StandardError, "Unsupported format: #{ext}. Use .nt or .ttl"
           end
 
           warn("[OntoLex] Loaded #{graph.count} statements")
           graph
         end
 
-        # Detect whether the backend triple store is 4store.
-        # We inspect the data client's endpoint URL or class name for known identifiers.
+        # ---------------------------------------------------------------------------
+        # Backend detection & client helpers
+        # ---------------------------------------------------------------------------
+
         def fourstore_backend?
           return @_fourstore_backend unless @_fourstore_backend.nil?
-          client = Goo.sparql_data_client
+          client   = Goo.sparql_data_client
           endpoint = client.respond_to?(:url) ? client.url.to_s :
                      (client.respond_to?(:instance_variable_get) ? client.instance_variable_get(:@url).to_s : '')
           @_fourstore_backend = endpoint.include?('4store') ||
                                 client.class.name.to_s.downcase.include?('4store') ||
                                 begin
-                                  # Probe: 4store returns its version string on a SPARQL error
                                   Goo.sparql_query_client(:main).query('SELECT * WHERE { ?s ?p ?o } LIMIT 0')
                                   false
                                 rescue SPARQL::Client::ServerError => err
@@ -202,869 +294,605 @@ module LinkedData
         end
 
         def sparql_update_client
-          # Always use the dedicated update client for write operations.
-          # sparql_query_client(:main) is read-only on 4store and will return a
-          # ServerError object instead of raising, which breaks `.id` calls downstream.
           Goo.sparql_update_client
         end
 
+        # ---------------------------------------------------------------------------
+        # Submission graph sync
+        # ---------------------------------------------------------------------------
+
         def sync_submission_graph(graph, submission)
-          warn("[OntoLex] Syncing full source graph into submission graph #{submission.id}")
-          tmp_file = Tempfile.new(['ontolex_source_graph', '.nt'])
-          begin
-            tmp_file.write(graph.dump(:ntriples))
-            tmp_file.flush
+          warn("[OntoLex] Syncing source graph → submission graph #{submission.id}")
+          Goo.sparql_data_client.delete_graph(submission.id)
 
-            Goo.sparql_data_client.delete_graph(submission.id)
-
-            if fourstore_backend?
-              # 4store does not support PUT to a named graph via the data client.
-              # Use SPARQL UPDATE (INSERT DATA) in batches instead.
-              warn("[OntoLex] 4store backend detected: loading graph via SPARQL UPDATE")
-              batch_size = 500
-              statements = graph.to_a
-              statements.each_slice(batch_size).with_index do |batch, idx|
-                nt_lines = batch.map { |st| st.to_ntriples }.join("\n")
-                insert_query = "INSERT DATA { GRAPH <#{submission.id}> {\n#{nt_lines}\n} }"
-                sparql_update_client.update(insert_query)
-                warn("[OntoLex] Inserted batch #{idx + 1} (#{batch.size} triples)")
-              end
-            else
-              Goo.sparql_data_client.put_triples(submission.id, tmp_file.path, 'application/n-triples')
+          if fourstore_backend?
+            warn("[OntoLex] 4store: loading #{graph.count} triples via SPARQL UPDATE batches")
+            statements = graph.to_a
+            total_batches = (statements.size.to_f / SYNC_BATCH_SIZE).ceil
+            statements.each_slice(SYNC_BATCH_SIZE).with_index(1) do |batch, idx|
+              nt_lines = batch.map(&:to_ntriples).join("\n")
+              sparql_update_client.update(
+                "INSERT DATA { GRAPH <#{submission.id}> {\n#{nt_lines}\n} }"
+              )
+              warn("[OntoLex] sync batch #{idx}/#{total_batches}") if (idx % 10).zero? || idx == total_batches
             end
-
-            warn("[OntoLex] Submission graph synchronized with #{graph.count} source triples")
-          ensure
-            tmp_file.close
-            tmp_file.unlink
+          else
+            tmp = Tempfile.new(['ontolex_source_graph', '.nt'])
+            begin
+              tmp.write(graph.dump(:ntriples))
+              tmp.flush
+              Goo.sparql_data_client.put_triples(submission.id, tmp.path, 'application/n-triples')
+            ensure
+              tmp.close
+              tmp.unlink
+            end
           end
+
+          warn("[OntoLex] Submission graph synchronized (#{graph.count} triples)")
         end
 
+        # ---------------------------------------------------------------------------
+        # Auxiliary entity indexers  (Definition, Note, UsageExample, Usage, Video,
+        #                             SignedForm, Reference, Activity, Agent)
+        # All follow the same pattern: build objects → bulk_save → return collection
+        # ---------------------------------------------------------------------------
+
         def index_definitions(graph, submission)
-          definitions = []
-          warn('[OntoLex] Indexing Definition objects...')
-
-          def_ids = subjects_of_type(graph, TERMLEX.Definition)
-          warn("[OntoLex] Found #{def_ids.size} Definition subjects")
-
-          def_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'definition')
-
-            defn = LinkedData::Models::OntoLex::Definition.new(id: id)
-            defn.submission = submission
-
-            lang = values_for(graph, orig_id, DCTERMS.language)
-            defn.language = lang if lang
-
-            value = values_for(graph, orig_id, RDF_NS.value)
-            defn.value = value if value
-
-            label = values_for(graph, orig_id, RDF::RDFS.label)
-            defn.label = label if label
-
-            derived_from = ref_values_for(graph, orig_id, PROV.wasDerivedFrom)
-            defn.wasDerivedFrom = derived_from if derived_from && !derived_from.empty?
-
-            if defn.valid?
-              warn("[OntoLex] Saving Definition #{id}")
-              defn.save(override_security: true)
-              definitions << defn
-              warn("[OntoLex] Definition saved successfully: language=#{defn.language}, value_length=#{defn.value&.to_s&.length || 0}")
-            else
-              warn("[OntoLex] Definition INVALID: #{id}, errors: #{defn.errors}")
-            end
+          warn('[OntoLex] Indexing Definitions...')
+          objs = type_subjects(TERMLEX.Definition).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'definition')
+            obj = LinkedData::Models::OntoLex::Definition.new(id: id)
+            obj.submission = submission
+            obj.language   = idx_values(orig_id, DCTERMS.language)
+            obj.value      = idx_values(orig_id, RDF_NS.value)
+            obj.label      = idx_values(orig_id, RDF::RDFS.label)
+            derived        = idx_ref_values(orig_id, PROV.wasDerivedFrom)
+            obj.wasDerivedFrom = derived if derived
+            obj
           end
-
-          warn("[OntoLex] Indexed #{definitions.size} definitions")
-          definitions
+          bulk_save(objs, submission, 'Definition')
+          warn("[OntoLex] Indexed #{objs.size} definitions")
+          objs
         end
 
         def index_notes(graph, submission)
-          notes = []
-          warn('[OntoLex] Indexing Note objects...')
-
-          note_ids = subjects_of_type(graph, TERMLEX.Note)
-          warn("[OntoLex] Found #{note_ids.size} Note subjects")
-
-          note_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'note')
-
-            note = LinkedData::Models::OntoLex::Note.new(id: id)
-            note.submission = submission
-
-            lang = values_for(graph, orig_id, DCTERMS.language)
-            note.language = lang if lang
-
-            value = values_for(graph, orig_id, RDF::RDFS.label)
-            note.value = value if value
-
-            derived_from = ref_values_for(graph, orig_id, PROV.wasDerivedFrom)
-            note.wasDerivedFrom = derived_from if derived_from && !derived_from.empty?
-
-            if note.valid?
-              warn("[OntoLex] Saving Note #{id}")
-              note.save(override_security: true)
-              notes << note
-            else
-              warn("[OntoLex] Note INVALID: #{id}, errors: #{note.errors}")
-            end
+          warn('[OntoLex] Indexing Notes...')
+          objs = type_subjects(TERMLEX.Note).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'note')
+            obj = LinkedData::Models::OntoLex::Note.new(id: id)
+            obj.submission = submission
+            obj.language   = idx_values(orig_id, DCTERMS.language)
+            obj.value      = idx_values(orig_id, RDF::RDFS.label)
+            derived        = idx_ref_values(orig_id, PROV.wasDerivedFrom)
+            obj.wasDerivedFrom = derived if derived
+            obj
           end
-
-          warn("[OntoLex] Indexed #{notes.size} notes")
-          notes
+          bulk_save(objs, submission, 'Note')
+          warn("[OntoLex] Indexed #{objs.size} notes")
+          objs
         end
 
         def index_usage_examples(graph, submission)
-          examples = []
-          warn('[OntoLex] Indexing UsageExample objects...')
-
-          example_ids = subjects_of_type(graph, LEXICOG.UsageExample)
-          warn("[OntoLex] Found #{example_ids.size} UsageExample subjects")
-
-          example_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'usage_example')
-
-            example = LinkedData::Models::OntoLex::UsageExample.new(id: id)
-            example.submission = submission
-
-            lang = values_for(graph, orig_id, DCTERMS.language)
-            example.language = lang if lang
-
-            value = values_for(graph, orig_id, RDF_NS.value)
-            example.value = value if value
-
-            source = values_for(graph, orig_id, DCTERMS.source)
-            example.source = source if source
-
-            if example.valid?
-              warn("[OntoLex] Saving UsageExample #{id}")
-              example.save(override_security: true)
-              examples << example
-            else
-              warn("[OntoLex] UsageExample INVALID: #{id}, errors: #{example.errors}")
-            end
+          warn('[OntoLex] Indexing UsageExamples...')
+          objs = type_subjects(LEXICOG.UsageExample).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'usage_example')
+            obj = LinkedData::Models::OntoLex::UsageExample.new(id: id)
+            obj.submission = submission
+            obj.language   = idx_values(orig_id, DCTERMS.language)
+            obj.value      = idx_values(orig_id, RDF_NS.value)
+            obj.source     = idx_values(orig_id, DCTERMS.source)
+            obj
           end
-
-          warn("[OntoLex] Indexed #{examples.size} usage examples")
-          examples
+          bulk_save(objs, submission, 'UsageExample')
+          warn("[OntoLex] Indexed #{objs.size} usage examples")
+          objs
         end
 
         def index_usages(graph, submission)
-          usages = []
-          warn('[OntoLex] Indexing Usage objects...')
-
-          usage_ids = subjects_of_type(graph, TERMLEX.Usage)
-          warn("[OntoLex] Found #{usage_ids.size} Usage subjects")
-
-          usage_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'usage')
-
-            usage = LinkedData::Models::OntoLex::Usage.new(id: id)
-            usage.submission = submission
-
-            lang = values_for(graph, orig_id, DCTERMS.language)
-            usage.language = lang if lang
-
-            value = values_for(graph, orig_id, RDF_NS.value)
-            usage.value = value if value
-
-            source = ref_values_for(graph, orig_id, DCTERMS.source)
-            usage.source = source if source && !source.empty?
-
-            if usage.valid?
-              warn("[OntoLex] Saving Usage #{id}")
-              usage.save(override_security: true)
-              usages << usage
-            else
-              warn("[OntoLex] Usage INVALID: #{id}, errors: #{usage.errors}")
-            end
+          warn('[OntoLex] Indexing Usages...')
+          objs = type_subjects(TERMLEX.Usage).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'usage')
+            obj = LinkedData::Models::OntoLex::Usage.new(id: id)
+            obj.submission = submission
+            obj.language   = idx_values(orig_id, DCTERMS.language)
+            obj.value      = idx_values(orig_id, RDF_NS.value)
+            src = idx_ref_values(orig_id, DCTERMS.source)
+            obj.source = src if src
+            obj
           end
-
-          warn("[OntoLex] Indexed #{usages.size} usages")
-          usages
-        end
-
-        def index_signed_forms(graph, submission, videos_by_id)
-          signed_forms = {}
-          warn('[OntoLex] Indexing SignedForm objects...')
-
-          sf_ids = subjects_of_type(graph, ETV.signedForm)
-          warn("[OntoLex] Found #{sf_ids.size} SignedForm subjects")
-
-          sf_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'signed_form')
-
-            sf = LinkedData::Models::OntoLex::SignedForm.new(id: id)
-            sf.submission = submission
-
-            # Read signedRep property and link to Video object
-            # signedRep is singular (not a list), so we take the first one
-            signed_rep_refs = graph.query(subject: orig_id, predicate: conv_uri(ETV.signedRep))
-            signed_rep_refs.each do |statement|
-              video = videos_by_id[statement.object]
-              if video
-                sf.signedRep = video  # Assign first video
-                warn("[OntoLex] Linked SignedForm #{id} -> Video #{video.id}")
-                break  # Only take the first one
-              else
-                warn("[OntoLex] WARNING: SignedForm #{id} references unknown Video #{statement.object}")
-              end
-            end
-
-            if sf.valid?
-              warn("[OntoLex] Saving SignedForm #{id}")
-              sf.save(override_security: true)
-              signed_forms[orig_id] = sf
-            else
-              warn("[OntoLex] SignedForm INVALID: #{id}, errors: #{sf.errors}")
-            end
-          end
-
-          warn("[OntoLex] Indexed #{signed_forms.size} signed forms")
-          signed_forms
+          bulk_save(objs, submission, 'Usage')
+          warn("[OntoLex] Indexed #{objs.size} usages")
+          objs
         end
 
         def index_videos(graph, submission)
+          warn('[OntoLex] Indexing Videos...')
           videos = {}
-          warn('[OntoLex] Indexing Video objects...')
-
-          video_ids = subjects_of_type(graph, ETV.Video)
-          warn("[OntoLex] Found #{video_ids.size} Video subjects")
-
-          video_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'video')
-
-            video = LinkedData::Models::OntoLex::Video.new(id: id)
-            video.submission = submission
-
-            url = values_for(graph, orig_id, ETV.url)
-            video.url = url if url
-
-            if video.valid?
-              warn("[OntoLex] Saving Video #{id}")
-              video.save(override_security: true)
-              videos[orig_id] = video
-            else
-              warn("[OntoLex] Video INVALID: #{id}, errors: #{video.errors}")
-            end
+          objs = type_subjects(ETV.Video).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'video')
+            obj = LinkedData::Models::OntoLex::Video.new(id: id)
+            obj.submission = submission
+            obj.url        = idx_values(orig_id, ETV.url)
+            videos[orig_id] = obj
+            obj
           end
-
+          bulk_save(objs, submission, 'Video')
           warn("[OntoLex] Indexed #{videos.size} videos")
           videos
         end
 
-        def index_references(graph, submission)
-          references = []
-          warn('[OntoLex] Indexing Reference (prov:Entity) objects...')
-
-          ref_ids = subjects_of_type(graph, PROV.Entity)
-          warn("[OntoLex] Found #{ref_ids.size} prov:Entity subjects")
-
-          ref_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'reference')
-
-            ref = LinkedData::Models::OntoLex::Reference.new(id: id)
-            ref.submission = submission
-
-            label = values_for(graph, orig_id, RDF::RDFS.label)
-            ref.label = label if label
-
-            value = values_for(graph, orig_id, RDF_NS.value)
-            ref.value = value if value
-
-            has_derivation = ref_values_for(graph, orig_id, PROV.hasDerivation)
-            ref.hasDerivation = has_derivation if has_derivation && !has_derivation.empty?
-
-            if ref.valid?
-              ref.save(override_security: true)
-              references << ref
-            else
-              warn("[OntoLex] Reference INVALID: #{id}, errors: #{ref.errors}")
+        def index_signed_forms(graph, submission, videos_by_id)
+          warn('[OntoLex] Indexing SignedForms...')
+          signed_forms = {}
+          objs = []
+          type_subjects(ETV.signedForm).each do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'signed_form')
+            obj = LinkedData::Models::OntoLex::SignedForm.new(id: id)
+            obj.submission = submission
+            # Link to first known Video
+            video_ref = (@prop_index[orig_id.to_s][conv_uri(ETV.signedRep).to_s] || []).first
+            if video_ref && videos_by_id[video_ref]
+              obj.signedRep = videos_by_id[video_ref]
             end
+            signed_forms[orig_id] = obj
+            objs << obj
           end
+          bulk_save(objs, submission, 'SignedForm')
+          warn("[OntoLex] Indexed #{signed_forms.size} signed forms")
+          signed_forms
+        end
 
-          warn("[OntoLex] Indexed #{references.size} references")
-          references
+        def index_references(graph, submission)
+          warn('[OntoLex] Indexing References...')
+          objs = type_subjects(PROV.Entity).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'reference')
+            obj = LinkedData::Models::OntoLex::Reference.new(id: id)
+            obj.submission = submission
+            obj.label      = idx_values(orig_id, RDF::RDFS.label)
+            obj.value      = idx_values(orig_id, RDF_NS.value)
+            deriv = idx_ref_values(orig_id, PROV.hasDerivation)
+            obj.hasDerivation = deriv if deriv
+            obj
+          end
+          bulk_save(objs, submission, 'Reference')
+          warn("[OntoLex] Indexed #{objs.size} references")
+          objs
         end
 
         def index_activities(graph, submission)
-          activities = []
-          warn('[OntoLex] Indexing Activity (prov:Activity) objects...')
-
-          act_ids = subjects_of_type(graph, PROV.Activity)
-          warn("[OntoLex] Found #{act_ids.size} prov:Activity subjects")
-
-          act_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'activity')
-
-            act = LinkedData::Models::OntoLex::Activity.new(id: id)
-            act.submission = submission
-
-            label = values_for(graph, orig_id, RDF::RDFS.label)
-            act.label = label if label
-
-            ended_at = values_for(graph, orig_id, PROV.endedAtTime)
-            act.endedAtTime = ended_at if ended_at
-
-            # hasDerivation points to Agent
-            has_deriv = values_for(graph, orig_id, PROV.hasDerivation)
-            act.hasDerivation = has_deriv if has_deriv
-
-            assoc_with = values_for(graph, orig_id, PROV.wasAssociatedWith)
-            act.wasAssociatedWith = assoc_with if assoc_with
-
-            influenced = ref_values_for(graph, orig_id, PROV.influenced)
-            act.influenced = influenced if influenced && !influenced.empty?
-
-            if act.valid?
-              act.save(override_security: true)
-              activities << act
-            else
-              warn("[OntoLex] Activity INVALID: #{id}, errors: #{act.errors}")
-            end
+          warn('[OntoLex] Indexing Activities...')
+          objs = type_subjects(PROV.Activity).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'activity')
+            obj = LinkedData::Models::OntoLex::Activity.new(id: id)
+            obj.submission  = submission
+            obj.label       = idx_values(orig_id, RDF::RDFS.label)
+            obj.endedAtTime = idx_values(orig_id, PROV.endedAtTime)
+            obj.hasDerivation   = idx_values(orig_id, PROV.hasDerivation)
+            obj.wasAssociatedWith = idx_values(orig_id, PROV.wasAssociatedWith)
+            infl = idx_ref_values(orig_id, PROV.influenced)
+            obj.influenced = infl if infl
+            obj
           end
-
-          warn("[OntoLex] Indexed #{activities.size} activities")
-          activities
+          bulk_save(objs, submission, 'Activity')
+          warn("[OntoLex] Indexed #{objs.size} activities")
+          objs
         end
 
         def index_agents(graph, submission)
-          agents = []
-          warn('[OntoLex] Indexing Agent (prov:Agent) objects...')
-
-          agent_ids = subjects_of_type(graph, PROV.Agent)
-          warn("[OntoLex] Found #{agent_ids.size} prov:Agent subjects")
-
-          agent_ids.each do |orig_id|
-            id = skolemize_id(orig_id, submission, 'agent')
-
-            agent = LinkedData::Models::OntoLex::Agent.new(id: id)
-            agent.submission = submission
-
-            name = values_for(graph, orig_id, FOAF.name)
-            agent.name = name if name
-
-            mbox = values_for(graph, orig_id, FOAF.mbox)
-            agent.mbox = mbox if mbox
-
-            assoc_for = ref_values_for(graph, orig_id, PROV.wasAssociatedFor)
-            agent.wasAssociatedFor = assoc_for if assoc_for && !assoc_for.empty?
-
-            if agent.valid?
-              agent.save(override_security: true)
-              agents << agent
-            else
-              warn("[OntoLex] Agent INVALID: #{id}, errors: #{agent.errors}")
-            end
+          warn('[OntoLex] Indexing Agents...')
+          objs = type_subjects(PROV.Agent).map do |orig_id|
+            id  = skolemize_id(orig_id, submission, 'agent')
+            obj = LinkedData::Models::OntoLex::Agent.new(id: id)
+            obj.submission = submission
+            obj.name       = idx_values(orig_id, FOAF.name)
+            obj.mbox       = idx_values(orig_id, FOAF.mbox)
+            assoc = idx_ref_values(orig_id, PROV.wasAssociatedFor)
+            obj.wasAssociatedFor = assoc if assoc
+            obj
           end
-
-          warn("[OntoLex] Indexed #{agents.size} agents")
-          agents
+          bulk_save(objs, submission, 'Agent')
+          warn("[OntoLex] Indexed #{objs.size} agents")
+          objs
         end
+
+        # ---------------------------------------------------------------------------
+        # SKOS Concepts (stored as LinkedData::Models::Class)
+        # ---------------------------------------------------------------------------
 
         def index_skos_concepts(graph, submission)
-          skos_concepts = []
-          skos_concepts_by_id = {}
-
-          warn('[OntoLex] Indexing SKOS Concept objects...')
-
-          skos_ids = subjects_of_type(graph, SKOS.Concept)
-          lexical_ids = subjects_of_type(graph, ONTOLEX.LexicalConcept)
+          warn('[OntoLex] Indexing SKOS Concepts...')
+          skos_ids   = type_subjects(SKOS.Concept)
+          lexical_ids = type_subjects(ONTOLEX.LexicalConcept)
           pure_skos_ids = skos_ids - lexical_ids
 
-          warn("[OntoLex] Found #{pure_skos_ids.size} pure SKOS Concept subjects (#{skos_ids.size} total - #{lexical_ids.size} lexical)")
+          skos_concepts_by_id = {}
+          objs = []
 
           pure_skos_ids.each do |orig_id|
-            id = orig_id
+            sc = LinkedData::Models::Class.new(id: orig_id)
+            sc.submission = submission
+            sc.prefLabel  = idx_values(orig_id, SKOS.prefLabel)
 
-            skos_concept = LinkedData::Models::Class.new(id: id)
-            skos_concept.submission = submission
-
-            pref_label = values_for(graph, orig_id, SKOS.prefLabel)
-            skos_concept.prefLabel = pref_label if pref_label
-
-            broader = values_for(graph, orig_id, SKOS.broader)
+            broader = idx_values(orig_id, SKOS.broader)
             if broader
-              broader_array = broader.is_a?(Array) ? broader : [broader]
-              broader_objs = broader_array.map { |uri| LinkedData::Models::Class.new(id: uri) }
-              skos_concept.parents = broader_objs unless broader_objs.empty?
+              broader_array = Array(broader)
+              sc.parents = broader_array.map { |uri| LinkedData::Models::Class.new(id: uri) }
             end
 
-            narrower = values_for(graph, orig_id, SKOS.narrower)
-            if narrower
-              narrower_array = narrower.is_a?(Array) ? narrower : [narrower]
-            end
+            in_scheme = idx_values(orig_id, SKOS.inScheme)
+            sc.inScheme = Array(in_scheme) if in_scheme
 
-            in_scheme = values_for(graph, orig_id, SKOS.inScheme)
-            if in_scheme
-              in_scheme_array = in_scheme.is_a?(Array) ? in_scheme : [in_scheme]
-              skos_concept.inScheme = in_scheme_array
-            end
+            skos_concepts_by_id[orig_id] = sc
+            objs << sc
+          end
 
-            if skos_concept.valid?
-              warn("[OntoLex] Saving SKOS Concept #{id}")
-              skos_concept.save(override_security: true)
+          bulk_save(objs, submission, 'SKOSConcept')
 
-              top_concept_of = values_for(graph, orig_id, SKOS.isTopConceptOf)
-              if top_concept_of
-                graph_uri = submission.id
-                concept_uri = id
-                top_concept_predicate = RDF::URI('http://www.w3.org/2004/02/skos/core#isTopConceptOf')
-
-                client = sparql_update_client
-                top_concept_array = top_concept_of.is_a?(Array) ? top_concept_of : [top_concept_of]
-                top_concept_array.each do |tc|
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { <#{concept_uri}> <#{top_concept_predicate}> <#{tc}> } }"
-                  begin
-                    client.update(insert_query)
-                    warn("[OntoLex] Manually inserted isTopConceptOf triple: #{concept_uri} -> #{tc}")
-                  rescue StandardError => e
-                    warn("[OntoLex] Failed to insert isTopConceptOf triple: #{e.message}")
-                  end
-                end
-              end
-
-              skos_concepts << skos_concept
-              skos_concepts_by_id[orig_id] = skos_concept
-              warn("[OntoLex] SKOS Concept saved successfully: prefLabel=#{skos_concept.prefLabel}")
-            else
-              warn("[OntoLex] SKOS Concept INVALID: #{id}, errors: #{skos_concept.errors}")
+          # isTopConceptOf — batch all triples together
+          top_concept_pred = RDF::URI('http://www.w3.org/2004/02/skos/core#isTopConceptOf')
+          top_triples = []
+          pure_skos_ids.each do |orig_id|
+            tc = idx_values(orig_id, SKOS.isTopConceptOf)
+            next unless tc
+            Array(tc).each { |t| top_triples << "<#{orig_id}> <#{top_concept_pred}> <#{t}> ." }
+          end
+          unless top_triples.empty?
+            top_triples.each_slice(SYNC_BATCH_SIZE) do |batch|
+              sparql_update_client.update(
+                "INSERT DATA { GRAPH <#{submission.id}> { #{batch.join(' ')} } }"
+              )
             end
           end
 
-          warn("[OntoLex] Indexed #{skos_concepts.size} SKOS concepts")
-          [skos_concepts_by_id, skos_concepts]
+          warn("[OntoLex] Indexed #{objs.size} SKOS concepts")
+          [skos_concepts_by_id, objs]
         end
 
+        # ---------------------------------------------------------------------------
+        # LexicalConcepts
+        # ---------------------------------------------------------------------------
+
         def index_concepts(graph, submission, skos_concepts_by_id = {})
-          concepts = []
+          warn('[OntoLex] Indexing LexicalConcepts...')
           concepts_by_id = {}
-          ids = subjects_of_type(graph, ONTOLEX.LexicalConcept)
-          ids.each do |orig_id|
+          objs = []
+
+          type_subjects(ONTOLEX.LexicalConcept).each do |orig_id|
             id = skolemize_id(orig_id, submission, 'concept')
             lc = LinkedData::Models::OntoLex::LexicalConcept.new(id: id)
             lc.submission = submission
 
-            # Basic properties
-            defs = values_for(graph, orig_id, SKOS.definition)
+            defs = idx_values(orig_id, SKOS.definition)
             lc.definition = Array(defs) if defs
 
-            notes = values_for(graph, orig_id, SKOS.note)
+            notes = idx_values(orig_id, SKOS.note)
             lc.note = Array(notes) if notes
 
-            schemes = values_for(graph, orig_id, SKOS.inScheme)
+            schemes = idx_values(orig_id, SKOS.inScheme)
             lc.inScheme = schemes.is_a?(Array) ? schemes.first : schemes if schemes
 
-            source = values_for(graph, orig_id, DCTERMS.source)
-            lc.source = source if source
+            lc.source = idx_values(orig_id, DCTERMS.source)
 
-            # Subject (link to SKOS Concept)
-            subj_uri = values_for(graph, orig_id, DCTERMS.subject)
+            subj_uri = idx_values(orig_id, DCTERMS.subject)
             if subj_uri
               subj_uri = subj_uri.is_a?(Array) ? subj_uri.first : subj_uri
-              skos_concept = skos_concepts_by_id[subj_uri]
-              lc.subject = skos_concept if skos_concept
-              warn("[OntoLex] Linked LexicalConcept #{id} to SKOS Concept #{subj_uri}")
+              lc.subject = skos_concepts_by_id[subj_uri] if skos_concepts_by_id[subj_uri]
             end
 
-            # Semantic relations within the same resource
-            broader = ref_values_for(graph, orig_id, SKOS.broader)
-            lc.broader = broader if broader && !broader.empty?
-
-            narrower = ref_values_for(graph, orig_id, SKOS.narrower)
-            lc.narrower = narrower if narrower && !narrower.empty?
-
-            related = ref_values_for(graph, orig_id, SKOS.related)
-            lc.related = related if related && !related.empty?
-
-            # Mapping relations to other resources
-            mapping_rel = ref_values_for(graph, orig_id, SKOS.mappingRelation)
-            lc.mappingRelation = mapping_rel if mapping_rel && !mapping_rel.empty?
-
-            broad_match = ref_values_for(graph, orig_id, SKOS.broadMatch)
-            lc.broadMatch = broad_match if broad_match && !broad_match.empty?
-
-            close_match = ref_values_for(graph, orig_id, SKOS.closeMatch)
-            lc.closeMatch = close_match if close_match && !close_match.empty?
-
-            exact_match = ref_values_for(graph, orig_id, SKOS.exactMatch)
-            lc.exactMatch = exact_match if exact_match && !exact_match.empty?
-
-            narrow_match = ref_values_for(graph, orig_id, SKOS.narrowMatch)
-            lc.narrowMatch = narrow_match if narrow_match && !narrow_match.empty?
-
-            related_match = ref_values_for(graph, orig_id, SKOS.relatedMatch)
-            lc.relatedMatch = related_match if related_match && !related_match.empty?
-
-            # Other semantic relations
-            diff_from = ref_values_for(graph, orig_id, OWL.differentFrom)
-            lc.differentFrom = diff_from if diff_from && !diff_from.empty?
-
-            antonym = ref_values_for(graph, orig_id, LEXINFO.antonym)
-            lc.antonym = antonym if antonym && !antonym.empty?
-
-            is_part_of = ref_values_for(graph, orig_id, DCTERMS.isPartOf)
-            lc.isPartOf = is_part_of if is_part_of && !is_part_of.empty?
-
-            has_part = ref_values_for(graph, orig_id, DCTERMS.hasPart)
-            lc.hasPart = has_part if has_part && !has_part.empty?
-
-            # Domain-specific relations
-            capital = ref_values_for(graph, orig_id, DBO.capital)
-            lc.capital = capital if capital && !capital.empty?
-
-            currency = ref_values_for(graph, orig_id, DBO.currency)
-            lc.currency = currency if currency && !currency.empty?
-
-            caused_by = ref_values_for(graph, orig_id, DBO.causedBy)
-            lc.causedBy = caused_by if caused_by && !caused_by.empty?
-
-            precedes = ref_values_for(graph, orig_id, RICO.precedesInTime)
-            lc.precedesInTime = precedes if precedes && !precedes.empty?
-
-            follows = ref_values_for(graph, orig_id, RICO.followsInTime)
-            lc.followsInTime = follows if follows && !follows.empty?
-
-            has_location = ref_values_for(graph, orig_id, DUL.hasLocation)
-            lc.hasLocation = has_location if has_location && !has_location.empty?
-
-            if lc.valid?
-              warn('[OntoLex] Concept VALID, saving...')
-              lc.save(override_security: true)
-              warn('[OntoLex] Concept saved successfully')
-            else
-              warn("[OntoLex] Concept validation errors: #{lc.errors.inspect}")
+            [
+              [:broader,        SKOS.broader],
+              [:narrower,       SKOS.narrower],
+              [:related,        SKOS.related],
+              [:mappingRelation, SKOS.mappingRelation],
+              [:broadMatch,     SKOS.broadMatch],
+              [:closeMatch,     SKOS.closeMatch],
+              [:exactMatch,     SKOS.exactMatch],
+              [:narrowMatch,    SKOS.narrowMatch],
+              [:relatedMatch,   SKOS.relatedMatch],
+              [:differentFrom,  OWL.differentFrom],
+              [:antonym,        LEXINFO.antonym],
+              [:isPartOf,       DCTERMS.isPartOf],
+              [:hasPart,        DCTERMS.hasPart],
+              [:capital,        DBO.capital],
+              [:currency,       DBO.currency],
+              [:causedBy,       DBO.causedBy],
+              [:precedesInTime, RICO.precedesInTime],
+              [:followsInTime,  RICO.followsInTime],
+              [:hasLocation,    DUL.hasLocation],
+            ].each do |attr, pred|
+              vals = idx_ref_values(orig_id, pred)
+              lc.send("#{attr}=", vals) if vals && !vals.empty?
             end
-            concepts << lc
+
             concepts_by_id[orig_id] = lc
+            objs << lc
           end
-          [concepts_by_id, concepts]
+
+          bulk_save(objs, submission, 'LexicalConcept')
+          warn("[OntoLex] Indexed #{objs.size} lexical concepts")
+          [concepts_by_id, objs]
         end
 
+        # ---------------------------------------------------------------------------
+        # Forms
+        # ---------------------------------------------------------------------------
+
         def index_forms(graph, submission)
+          warn('[OntoLex] Indexing Forms...')
           forms = {}
-          ids = subjects_of_type(graph, ONTOLEX.Form)
-          ids.each do |orig_id|
+          objs  = []
+
+          type_subjects(ONTOLEX.Form).each do |orig_id|
             id = skolemize_id(orig_id, submission, 'form')
-            f = LinkedData::Models::OntoLex::Form.new(id: id)
+            f  = LinkedData::Models::OntoLex::Form.new(id: id)
             f.submission = submission
 
-            wrep = values_for(graph, orig_id, ONTOLEX.writtenRep)
-            if wrep && !wrep.is_a?(Array)
-              f.writtenRep = wrep.respond_to?(:value) ? wrep.value : wrep.to_s
-            elsif wrep.is_a?(Array)
-              f.writtenRep = wrep.first.respond_to?(:value) ? wrep.first.value : wrep.first.to_s
+            wrep_vals = @prop_index[orig_id.to_s][conv_uri(ONTOLEX.writtenRep).to_s]
+            if wrep_vals && !wrep_vals.empty?
+              first = wrep_vals.first
+              f.writtenRep = first.respond_to?(:value) ? first.value : first.to_s
+              lang = wrep_vals.map { |v| v.respond_to?(:language) ? v.language.to_s : nil }.compact.first
+              f.language = lang if lang && !lang.empty?
             end
 
-            langs = []
-            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.writtenRep)).each do |vs|
-              langs << vs.object.language.to_s if vs.object.respond_to?(:language) && vs.object.language
-            end
-            f.language = langs.first unless langs.empty?
+            f.gender     = idx_values(orig_id, LEXINFO.gender)
+            f.number     = idx_values(orig_id, LEXINFO.number)
+            f.signedForm = idx_values(orig_id, ETV.signedForm)
 
-            gend = values_for(graph, orig_id, LEXINFO.gender)
-            f.gender = gend if gend
-
-            numb = values_for(graph, orig_id, LEXINFO.number)
-            f.number = numb if numb
-
-            # New: signedForm support
-            signed_form = values_for(graph, orig_id, ETV.signedForm)
-            f.signedForm = signed_form if signed_form
-
-            if f.valid?
-              warn('[OntoLex] Form VALID, saving...')
-              f.save(override_security: true)
-              warn('[OntoLex] Form saved successfully')
-            else
-              warn("[OntoLex] Form validation errors: #{f.errors.inspect}")
-            end
             forms[orig_id] = f
+            objs << f
           end
+
+          bulk_save(objs, submission, 'Form')
+          warn("[OntoLex] Indexed #{forms.size} forms")
           forms
         end
 
+        # ---------------------------------------------------------------------------
+        # LexicalSenses
+        # ---------------------------------------------------------------------------
+
         def index_senses(graph, submission, concepts_by_id)
+          warn('[OntoLex] Indexing LexicalSenses...')
           senses = {}
-          ids = subjects_of_type(graph, ONTOLEX.LexicalSense)
-          ids.each do |orig_id|
+          objs   = []
+
+          type_subjects(ONTOLEX.LexicalSense).each do |orig_id|
             id = skolemize_id(orig_id, submission, 'sense')
-            s = LinkedData::Models::OntoLex::LexicalSense.new(id: id)
-            s.submission  = submission
-            s.definition  = values_for(graph, orig_id, DCTERMS.definition)
-            s.example     = values_for(graph, orig_id, DCTERMS.example)
-            s.reference   = values_for(graph, orig_id, ONTOLEX.reference)
-            s.synonym     = ref_values_for(graph, orig_id, LEXINFO.synonym)
-            s.translation = ref_values_for(graph, orig_id, VARTRANS.translation)
+            s  = LinkedData::Models::OntoLex::LexicalSense.new(id: id)
+            s.submission = submission
 
-            # New properties
-            norm_auth = values_for(graph, orig_id, LEXINFO.normativeAuthorization)
-            s.normativeAuthorization = norm_auth if norm_auth
+            s.definition           = idx_values(orig_id, DCTERMS.definition)
+            s.example              = idx_values(orig_id, DCTERMS.example)
+            s.reference            = idx_values(orig_id, ONTOLEX.reference)
+            s.synonym              = idx_ref_values(orig_id, LEXINFO.synonym)
+            s.translation          = idx_ref_values(orig_id, VARTRANS.translation)
+            s.normativeAuthorization = idx_values(orig_id, LEXINFO.normativeAuthorization)
+            s.termType             = idx_values(orig_id, LEXINFO.termType)
+            s.reliabilityCode      = idx_values(orig_id, TERMLEX.reliabilityCode)
 
-            term_type = values_for(graph, orig_id, LEXINFO.termType)
-            s.termType = term_type if term_type
+            ue = idx_ref_values(orig_id, LEXICOG.usageExample)
+            s.usageExample = ue if ue
 
-            usage_ex = ref_values_for(graph, orig_id, LEXICOG.usageExample)
-            s.usageExample = usage_ex if usage_ex && !usage_ex.empty?
+            usage = idx_ref_values(orig_id, TERMLEX.usage)
+            s.usage = usage if usage
 
-            rel_code = values_for(graph, orig_id, TERMLEX.reliabilityCode)
-            s.reliabilityCode = rel_code if rel_code
+            is_sense_of = (@prop_index[orig_id.to_s][conv_uri(ONTOLEX.isSenseOf).to_s] || []).first
+            s.isSenseOf = is_sense_of if is_sense_of
 
-            usage = ref_values_for(graph, orig_id, TERMLEX.usage)
-            s.usage = usage if usage && !usage.empty?
-
-            is_sense_of_uri = graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.isSenseOf)).map(&:object).first
-            s.isSenseOf = is_sense_of_uri if is_sense_of_uri
-            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.isLexicalizedSenseOf)).each do |vs|
-              concept = concepts_by_id[vs.object]
-              s.lexicalConcept = concept if concept
+            lex_concept_uris = @prop_index[orig_id.to_s][conv_uri(ONTOLEX.isLexicalizedSenseOf).to_s] || []
+            lex_concept_uris.each do |uri|
+              c = concepts_by_id[uri]
+              s.lexicalConcept = c if c
             end
-            if s.valid?
-              warn('[OntoLex] Sense VALID, saving...')
-              s.save(override_security: true)
-              warn('[OntoLex] Sense saved successfully')
-            else
-              warn("[OntoLex] Sense validation errors: #{s.errors.inspect}")
-            end
+
             senses[orig_id] = s
+            objs << s
           end
-          [senses, senses.values]
+
+          bulk_save(objs, submission, 'LexicalSense')
+          warn("[OntoLex] Indexed #{senses.size} senses")
+          [senses, objs]
         end
 
+        # ---------------------------------------------------------------------------
+        # LexicalEntries
+        # ---------------------------------------------------------------------------
+
         def index_entries(graph, submission, forms_by_id, senses_by_id, concepts_by_id, signed_forms_by_id = {})
-          entries = []
+          warn('[OntoLex] Indexing LexicalEntries...')
+          entries       = []
           entries_by_id = {}
-          ids = subjects_of_type(graph, ONTOLEX.LexicalEntry)
-          ids.each do |orig_id|
+          # Accumulate cross-reference triples (form, sense, signedForm links)
+          # for a single batch INSERT at the end of this phase
+          xref_triples  = []
+
+          form_pred        = RDF::URI('http://www.w3.org/ns/lemon/ontolex#form')
+          sense_pred       = RDF::URI('http://www.w3.org/ns/lemon/ontolex#sense')
+          signed_form_pred = RDF::URI('https://w3id.org/def/easytv#signedForm')
+
+          type_subjects(ONTOLEX.LexicalEntry).each do |orig_id|
             id = skolemize_id(orig_id, submission, 'entry')
-            e = LinkedData::Models::OntoLex::LexicalEntry.new(id: id)
+            e  = LinkedData::Models::OntoLex::LexicalEntry.new(id: id)
             e.submission = submission
 
-            canon_form = values_for(graph, orig_id, ONTOLEX.canonicalForm)
-            e.lemma = canon_form if canon_form
+            e.lemma        = idx_values(orig_id, ONTOLEX.canonicalForm)
+            e.language     = idx_values(orig_id, DCTERMS.language)
+            e.partOfSpeech = idx_values(orig_id, LEXINFO.partOfSpeech)
+            e.termType     = idx_values(orig_id, LEXINFO.termType)
+            e.casNumber    = idx_values(orig_id, DBO.casNumber)
+            e.code         = idx_values(orig_id, DBO.code)
 
-            lang = values_for(graph, orig_id, DCTERMS.language)
-            e.language = lang if lang
+            valency = idx_ref_values(orig_id, OLIA.hasValency)
+            e.hasValency = valency if valency
 
-            pos = values_for(graph, orig_id, LEXINFO.partOfSpeech)
-            e.partOfSpeech = pos if pos
+            # SignedForms
+            sf_list = (@prop_index[orig_id.to_s][conv_uri(ETV.signedForm).to_s] || [])
+                        .map { |ref| signed_forms_by_id[ref] }.compact
+            e.signedForm = sf_list unless sf_list.empty?
 
-            tt = values_for(graph, orig_id, LEXINFO.termType)
-            e.termType = tt if tt
+            derived = idx_ref_values(orig_id, PROV.wasDerivedFrom)
+            e.wasDerivedFrom = derived if derived
 
-            # New properties
-            cas_num = values_for(graph, orig_id, DBO.casNumber)
-            e.casNumber = cas_num if cas_num
+            influenced = idx_ref_values(orig_id, PROV.wasInfluencedBy)
+            e.wasInfluencedBy = influenced if influenced
 
-            code = values_for(graph, orig_id, DBO.code)
-            e.code = code if code
-
-            valency = ref_values_for(graph, orig_id, OLIA.hasValency)
-            e.hasValency = valency if valency && !valency.empty?
-
-            # signedForm for entries - link to SignedForm objects
-            signed_forms_list = []
-            graph.query(subject: orig_id, predicate: conv_uri(ETV.signedForm)).each do |vs|
-              sf = signed_forms_by_id[vs.object]
-              signed_forms_list << sf if sf
+            # Forms
+            form_uris = [ONTOLEX.canonicalForm, ONTOLEX.otherForm, ONTOLEX.lexicalForm].flat_map do |pf|
+              @prop_index[orig_id.to_s][conv_uri(pf).to_s] || []
             end
-            e.signedForm = signed_forms_list unless signed_forms_list.empty?
-
-            derived_from = ref_values_for(graph, orig_id, PROV.wasDerivedFrom)
-            e.wasDerivedFrom = derived_from if derived_from && !derived_from.empty?
-
-            influenced_by = ref_values_for(graph, orig_id, PROV.wasInfluencedBy)
-            e.wasInfluencedBy = influenced_by if influenced_by && !influenced_by.empty?
-
-            forms = []
-            [ONTOLEX.canonicalForm, ONTOLEX.otherForm, ONTOLEX.lexicalForm].each do |pf|
-              graph.query(subject: orig_id, predicate: conv_uri(pf)).each do |vs|
-                forms << forms_by_id[vs.object] if forms_by_id[vs.object]
-              end
-            end
+            forms = form_uris.map { |uri| forms_by_id[uri] }.compact
             e.form = forms unless forms.empty?
 
-            linked_senses = []
-            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.sense)).each do |vs|
-              s = senses_by_id[vs.object]
-              linked_senses << s if s
-            end
+            # Senses
+            sense_uris = @prop_index[orig_id.to_s][conv_uri(ONTOLEX.sense).to_s] || []
+            linked_senses = sense_uris.map { |uri| senses_by_id[uri] }.compact
             e.sense = linked_senses unless linked_senses.empty?
 
-            evoked_concept = nil
-            graph.query(subject: orig_id, predicate: conv_uri(ONTOLEX.evokes)).each do |vs|
-              c = concepts_by_id[vs.object]
-              evoked_concept = c if c
-              break # Only take the first one since it's a single-value attribute TODO: maybe handle multiple?
-            end
-            e.evokes = evoked_concept if evoked_concept
+            # Evokes
+            evoked_uri = (@prop_index[orig_id.to_s][conv_uri(ONTOLEX.evokes).to_s] || []).first
+            e.evokes = concepts_by_id[evoked_uri] if evoked_uri && concepts_by_id[evoked_uri]
 
-            if e.valid?
-              e.save(override_security: true)
-              if !forms.empty? || !linked_senses.empty? || !signed_forms_list.empty?
-                graph_uri = submission.id
-                entry_uri = e.id
-                form_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#form')
-                sense_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#sense')
-                signed_form_predicate = RDF::URI('https://w3id.org/def/easytv#signedForm')
+            entries_by_id[orig_id] = e
+            entries << e
 
-                update_client = sparql_update_client
+            # Collect cross-reference triples to batch later (after bulk_save sets .id)
+            # We store closures because e.id may change if Goo generates it lazily
+            forms.each        { |f|  xref_triples << -> { "<#{e.id}> <#{form_pred}> <#{f.id}> ." } }
+            linked_senses.each { |s| xref_triples << -> { "<#{e.id}> <#{sense_pred}> <#{s.id}> ." } }
+            sf_list.each       { |sf| xref_triples << -> { "<#{e.id}> <#{signed_form_pred}> <#{sf.id}> ." } }
+          end
 
-                # Batch all triples for this entry into a single INSERT DATA to reduce round-trips
-                # (important for 4store which has a high per-request overhead)
-                triple_lines = []
-                forms.each { |form| triple_lines << "<#{entry_uri}> <#{form_predicate}> <#{form.id}> ." }
-                linked_senses.each { |sense| triple_lines << "<#{entry_uri}> <#{sense_predicate}> <#{sense.id}> ." }
-                signed_forms_list.each { |sf| triple_lines << "<#{entry_uri}> <#{signed_form_predicate}> <#{sf.id}> ." }
+          bulk_save(entries, submission, 'LexicalEntry')
 
-                unless triple_lines.empty?
-                  insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { #{triple_lines.join(' ')} } }"
+          # Now that all entries are persistent and have stable IDs, flush xref triples
+          unless xref_triples.empty?
+            resolved = xref_triples.map(&:call)
+            resolved.each_slice(SYNC_BATCH_SIZE) do |batch|
+              begin
+                sparql_update_client.update(
+                  "INSERT DATA { GRAPH <#{submission.id}> { #{batch.join(' ')} } }"
+                )
+              rescue StandardError => e
+                warn("[OntoLex] Failed to insert entry xref batch: #{e.message}")
+                # Fallback: one by one
+                batch.each do |triple|
                   begin
-                    update_client.update(insert_query)
-                    warn("[OntoLex] Inserted #{triple_lines.size} triples for entry #{entry_uri}")
-                  rescue StandardError => insert_err
-                    warn("[OntoLex] Batch insert failed for entry #{entry_uri}: #{insert_err.message}")
-                    # Fall back to one-by-one inserts so partial data is preserved
-                    triple_lines.each do |triple|
-                      begin
-                        update_client.update("INSERT DATA { GRAPH <#{graph_uri}> { #{triple} } }")
-                      rescue StandardError => single_err
-                        warn("[OntoLex] Failed to insert triple '#{triple}': #{single_err.message}")
-                      end
-                    end
+                    sparql_update_client.update(
+                      "INSERT DATA { GRAPH <#{submission.id}> { #{triple} } }"
+                    )
+                  rescue StandardError => single_err
+                    warn("[OntoLex] Failed to insert triple '#{triple}': #{single_err.message}")
                   end
                 end
-
-                e.instance_variable_set(:@computed_forms, nil) if e.instance_variable_defined?(:@computed_forms)
-                e.instance_variable_set(:@computed_senses, nil) if e.instance_variable_defined?(:@computed_senses)
-                e.remove_instance_variable(:@computed_forms) if e.instance_variable_defined?(:@computed_forms)
-                e.remove_instance_variable(:@computed_senses) if e.instance_variable_defined?(:@computed_senses)
               end
-            else
-              warn("[OntoLex] Entry validation errors: #{e.errors.inspect}")
             end
-            entries << e
-            entries_by_id[orig_id] = e
+            warn("[OntoLex] Inserted #{resolved.size} entry cross-reference triples")
           end
+
+          warn("[OntoLex] Indexed #{entries.size} lexical entries")
           [entries_by_id, entries]
         end
 
+        # ---------------------------------------------------------------------------
+        # Second pass: link cross-references for concepts
+        # ---------------------------------------------------------------------------
+
         def link_cross_references(graph, concepts_by_id, entries_by_id, senses_by_id, submission)
-          warn('[OntoLex] Starting second pass to link cross-references...')
+          warn('[OntoLex] Linking cross-references (second pass)...')
+
+          isEvokedBy_pred      = RDF::URI('http://www.w3.org/ns/lemon/ontolex#isEvokedBy')
+          lexSense_pred        = RDF::URI('http://www.w3.org/ns/lemon/ontolex#lexicalizedSense')
+          all_triples          = []
 
           concepts_by_id.each do |orig_id, concept|
-            evoked_by = ref_values_for(graph, orig_id, ONTOLEX.isEvokedBy)
-            if evoked_by && !evoked_by.empty?
+            evoked_by = idx_ref_values(orig_id, ONTOLEX.isEvokedBy)
+            if evoked_by
               evoked_entries = evoked_by.map { |uri| entries_by_id[uri] }.compact
-              unless evoked_entries.empty?
-                concept.isEvokedBy = evoked_entries
-                warn("[OntoLex] Setting isEvokedBy for concept #{concept.id}: #{evoked_entries.size} entries")
-              end
+              concept.isEvokedBy = evoked_entries unless evoked_entries.empty?
             end
 
-            lex_senses = ref_values_for(graph, orig_id, ONTOLEX.lexicalizedSense)
-            if lex_senses && !lex_senses.empty?
+            lex_senses = idx_ref_values(orig_id, ONTOLEX.lexicalizedSense)
+            if lex_senses
               sense_objs = lex_senses.map { |uri| senses_by_id[uri] }.compact
-              unless sense_objs.empty?
-                concept.lexicalizedSense = sense_objs
-                warn("[OntoLex] Setting lexicalizedSense for concept #{concept.id}: #{sense_objs.size} senses")
-              end
+              concept.lexicalizedSense = sense_objs unless sense_objs.empty?
             end
 
-            if concept.valid?
-              graph_uri = submission.id
-              concept_uri = concept.id
-              isEvokedBy_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#isEvokedBy')
-              lexicalizedSense_predicate = RDF::URI('http://www.w3.org/ns/lemon/ontolex#lexicalizedSense')
+            # Validate without exist? check (objects are already persistent)
+            concept.instance_variable_set(:@persistent, true)
+            validation_errors = {}
+            concept.class.attributes.each do |attr|
+              inst_value = concept.instance_variable_get("@#{attr}")
+              attr_errors = Goo::Validators::Enforce.enforce(concept, attr, inst_value)
+              validation_errors[attr] = attr_errors unless attr_errors.nil?
+            end
 
-              update_client = sparql_update_client
-              triple_lines = []
-
-              if concept.isEvokedBy && !concept.isEvokedBy.empty?
-                concept.isEvokedBy.each do |entry|
-                  triple_lines << "<#{concept_uri}> <#{isEvokedBy_predicate}> <#{entry.id}> ."
-                end
+            if validation_errors.empty?
+              Array(concept.isEvokedBy).each do |entry|
+                all_triples << "<#{concept.id}> <#{isEvokedBy_pred}> <#{entry.id}> ."
               end
-
-              if concept.lexicalizedSense && !concept.lexicalizedSense.empty?
-                concept.lexicalizedSense.each do |sense|
-                  triple_lines << "<#{concept_uri}> <#{lexicalizedSense_predicate}> <#{sense.id}> ."
-                end
+              Array(concept.lexicalizedSense).each do |sense|
+                all_triples << "<#{concept.id}> <#{lexSense_pred}> <#{sense.id}> ."
               end
+            else
+              warn("[OntoLex] Concept #{concept.id} invalid during xref pass: #{validation_errors}")
+            end
+          end
 
-              unless triple_lines.empty?
-                insert_query = "INSERT DATA { GRAPH <#{graph_uri}> { #{triple_lines.join(' ')} } }"
-                begin
-                  update_client.update(insert_query)
-                rescue StandardError => batch_err
-                  warn("[OntoLex] Batch insert failed for concept #{concept_uri}: #{batch_err.message}")
-                  triple_lines.each do |triple|
-                    begin
-                      update_client.update("INSERT DATA { GRAPH <#{graph_uri}> { #{triple} } }")
-                    rescue StandardError => single_err
-                      warn("[OntoLex] Failed to insert triple '#{triple}': #{single_err.message}")
-                    end
+          unless all_triples.empty?
+            all_triples.each_slice(SYNC_BATCH_SIZE) do |batch|
+              begin
+                sparql_update_client.update(
+                  "INSERT DATA { GRAPH <#{submission.id}> { #{batch.join(' ')} } }"
+                )
+              rescue StandardError => e
+                warn("[OntoLex] Concept xref batch failed: #{e.message}")
+                batch.each do |triple|
+                  begin
+                    sparql_update_client.update(
+                      "INSERT DATA { GRAPH <#{submission.id}> { #{triple} } }"
+                    )
+                  rescue StandardError => se
+                    warn("[OntoLex] Failed triple: #{triple}: #{se.message}")
                   end
                 end
               end
-
-              warn("[OntoLex] Cross-references linked for concept #{concept.id}")
-            else
-              warn("[OntoLex] Concept validation errors during cross-reference linking: #{concept.errors.inspect}")
             end
+            warn("[OntoLex] Inserted #{all_triples.size} concept cross-reference triples")
           end
 
           warn('[OntoLex] Second pass completed')
         end
 
-        # Generate mapping triples for LOOM (lexical matching) and SAME_URI mappings
-        # This enables OntoLex terminologies to participate in cross-ontology mapping discovery
-        # following the same pattern used for OWL/SKOS ontologies in MissingLabelsHandler
-        # Note: Only LexicalEntries are processed since LexicalConcepts don't have prefLabel
+        # ---------------------------------------------------------------------------
+        # Mapping triples (LOOM + SAME_URI)
+        # ---------------------------------------------------------------------------
+
         def generate_mapping_triples(entries, submission)
-          warn('[OntoLex] Generating mapping triples for LOOM and SAME_URI...')
-          
-          # Skip if this is a view ontology
+          warn('[OntoLex] Generating LOOM/SAME_URI mapping triples...')
+
           submission.bring(:ontology) if submission.respond_to?(:bring) && submission.bring?(:ontology)
           submission.ontology.bring(:viewOf) if submission.ontology.respond_to?(:bring) && submission.ontology.bring?(:viewOf)
-          
+
           if submission.ontology.viewOf
             warn('[OntoLex] Skipping mapping generation for view ontology')
             return
           end
 
-          mapping_loom_predicate = Goo.vocabulary(:metadata_def)[:mappingLoom]
-          mapping_same_uri_predicate = Goo.vocabulary(:metadata_def)[:mappingSameURI]
-          
-          # First, delete any existing mapping triples to ensure we only have LexicalEntry mappings
-          # This cleans up any incorrect triples that may have been generated for concepts
-          begin
-            delete_query = <<-SPARQL
-DELETE WHERE {
-  GRAPH <#{submission.id}> {
-    ?s <#{mapping_loom_predicate}> ?o .
-  }
-}
-            SPARQL
-            Goo.sparql_update_client.update(delete_query)
-            
-            delete_query = <<-SPARQL
-DELETE WHERE {
-  GRAPH <#{submission.id}> {
-    ?s <#{mapping_same_uri_predicate}> ?o .
-  }
-}
-            SPARQL
-            Goo.sparql_update_client.update(delete_query)
-            warn('[OntoLex] Cleared existing mapping triples')
-          rescue StandardError => e
-            warn("[OntoLex] Failed to clear existing mapping triples: #{e.message}")
+          mapping_loom_pred     = Goo.vocabulary(:metadata_def)[:mappingLoom]
+          mapping_same_uri_pred = Goo.vocabulary(:metadata_def)[:mappingSameURI]
+
+          # Clear existing mapping triples
+          [mapping_loom_pred, mapping_same_uri_pred].each do |pred|
+            begin
+              sparql_update_client.update(
+                "DELETE WHERE { GRAPH <#{submission.id}> { ?s <#{pred}> ?o . } }"
+              )
+            rescue StandardError => e
+              warn("[OntoLex] Failed to clear mapping triples for #{pred}: #{e.message}")
+            end
           end
 
-          mapping_triples = []
-          
-          # Query for all entries and their form writtenReps directly from triple store
-          # This is more reliable than navigating through objects since forms may not be fully loaded
           query = <<-SPARQL
 SELECT DISTINCT ?entry (SAMPLE(?rep) as ?label)
 WHERE {
@@ -1077,111 +905,80 @@ WHERE {
 GROUP BY ?entry
           SPARQL
 
-          epr = Goo.sparql_query_client(:main)
-          solutions = epr.query(query)
-          
-          warn("[OntoLex] Found #{solutions.length} entries with labels for LOOM matching")
-          
+          solutions = Goo.sparql_query_client(:main).query(query)
+          warn("[OntoLex] #{solutions.length} entries found for LOOM matching")
+
+          mapping_triples = []
           solutions.each do |sol|
             entry_id = sol[:entry].to_s
-            label = sol[:label].to_s
-            
-            if label && !label.empty?
-              loom_label = loom_transform_literal(label)
-              
-              if loom_label.length > 2
-                mapping_triples << "<#{entry_id}> <#{mapping_loom_predicate}> \"#{loom_label}\" ."
-              end
-            end
-            
-            # SAME_URI mapping
-            mapping_triples << "<#{entry_id}> <#{mapping_same_uri_predicate}> <#{entry_id}> ."
+            label    = sol[:label].to_s
+            loom_label = loom_transform_literal(label)
+            mapping_triples << "<#{entry_id}> <#{mapping_loom_pred}> \"#{loom_label}\" ." if loom_label.length > 2
+            mapping_triples << "<#{entry_id}> <#{mapping_same_uri_pred}> <#{entry_id}> ."
           end
-          
-          # Insert mapping triples into the triple store
-          if mapping_triples.length > 0
-            warn("[OntoLex] Asserting #{mapping_triples.length} mapping triples for submission #{submission.id}")
-            
-            begin
-              # Insert in batches to avoid issues with large datasets
-              batch_size = 1000
-              mapping_triples.each_slice(batch_size) do |batch|
-                triples_str = batch.join("\n")
-                Goo.sparql_data_client.append_triples(
-                  submission.id, 
-                  triples_str, 
-                  mime_type = "application/x-turtle")
-              end
-              warn("[OntoLex] Mapping triples successfully inserted")
-              
-              # Regenerate mapping counts for this ontology so mappings appear in the frontend
-              regenerate_mapping_counts(submission)
-            rescue StandardError => e
-              warn("[OntoLex] Failed to insert mapping triples: #{e.message}")
+
+          if mapping_triples.any?
+            warn("[OntoLex] Inserting #{mapping_triples.size} mapping triples")
+            mapping_triples.each_slice(MAPPING_BATCH_SIZE) do |batch|
+              triples_str = batch.join("\n")
+              Goo.sparql_data_client.append_triples(
+                submission.id, triples_str, 'application/x-turtle'
+              )
             end
+            regenerate_mapping_counts(submission)
           else
             warn('[OntoLex] No mapping triples generated')
           end
         end
 
-        # Regenerate mapping counts for the ontology after parsing
-        # This updates the MappingCount cache that the frontend uses to display mappings
         def regenerate_mapping_counts(submission)
           acronym = submission.ontology.acronym
           warn("[OntoLex] Regenerating mapping counts for #{acronym}...")
-          
           begin
             require 'logger'
-            logger = Logger.new(STDERR)
-            logger.level = Logger::INFO
-            
-            LinkedData::Mappings.create_mapping_counts(logger, [acronym])
-            warn("[OntoLex] Mapping counts regenerated successfully for #{acronym}")
+            LinkedData::Mappings.create_mapping_counts(Logger.new(STDERR), [acronym])
+            warn("[OntoLex] Mapping counts regenerated for #{acronym}")
           rescue StandardError => e
             warn("[OntoLex] Failed to regenerate mapping counts: #{e.message}")
-            warn("[OntoLex] You can manually run: LinkedData::Mappings.create_mapping_counts(Logger.new(STDOUT), ['#{acronym}'])")
           end
         end
 
-        # Transform a label for LOOM lexical matching
-        # Removes whitespace and punctuation, lowercases the result
-        # Same algorithm as LinkedData::Models::OntologySubmission.loom_transform_literal
         def loom_transform_literal(lit)
-          res = []
-          lit.to_s.each_char do |c|
-            if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-              res << c.downcase
-            end
-          end
-          res.join('')
+          lit.to_s.chars.select { |c|
+            (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+          }.map(&:downcase).join
         end
+
+        # ---------------------------------------------------------------------------
+        # Legacy helpers (kept for compatibility; fast path uses idx_* above)
+        # ---------------------------------------------------------------------------
 
         def subjects_of_type(graph, type_uri)
+          return type_subjects(type_uri) if @type_index
+          subjects_of_type_slow(graph, type_uri)
+        end
+
+        def subjects_of_type_slow(graph, type_uri)
           target = conv_uri(type_uri).to_s
           ids = Set.new
-          graph.query(predicate: RDF.type).each do |st|
+          graph&.query(predicate: RDF.type)&.each do |st|
             ids << st.subject if st.object.to_s == target
           end
           ids
         end
 
         def values_for(graph, subject, predicate)
+          return idx_values(subject, predicate) if @prop_index
           pred = conv_uri(predicate)
-          vals = []
-          graph.query(subject: subject, predicate: pred).each do |st|
-            vals << st.object
-          end
+          vals = graph.query(subject: subject, predicate: pred).map(&:object)
           return nil if vals.empty?
-
           vals.length == 1 ? vals.first : vals
         end
 
         def ref_values_for(graph, subject, predicate)
+          return idx_ref_values(subject, predicate) if @prop_index
           pred = conv_uri(predicate)
-          vals = []
-          graph.query(subject: subject, predicate: pred).each do |st|
-            vals << st.object if st.object.is_a?(RDF::URI)
-          end
+          vals = graph.query(subject: subject, predicate: pred).map(&:object).select { |o| o.is_a?(RDF::URI) }
           vals.empty? ? nil : vals
         end
 
@@ -1191,9 +988,8 @@ GROUP BY ?entry
 
         def skolemize_id(term, submission, kind)
           return term if term.is_a?(RDF::URI)
-
           node_id = term.to_s.gsub(/^_:/, '')
-          prefix = LinkedData.settings.id_url_prefix || 'http://example.org'
+          prefix  = LinkedData.settings.id_url_prefix || 'http://example.org'
           RDF::URI.new("#{prefix}/.well-known/genid/ontolex/#{submission&.submissionId}/#{kind}/#{CGI.escape(node_id)}")
         end
       end
