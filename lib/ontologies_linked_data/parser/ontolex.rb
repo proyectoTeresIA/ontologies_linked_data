@@ -468,7 +468,6 @@ module LinkedData
             obj.label       = idx_values(orig_id, RDF::RDFS.label)
             obj.endedAtTime = idx_values(orig_id, PROV.endedAtTime)
             obj.hasDerivation   = idx_values(orig_id, PROV.hasDerivation)
-            obj.wasAssociatedWith = idx_values(orig_id, PROV.wasAssociatedWith)
             infl = idx_ref_values(orig_id, PROV.influenced)
             obj.influenced = infl if infl
             obj
