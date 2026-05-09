@@ -19,14 +19,10 @@ module LinkedData
           prop_count += 1 if line =~ /owl:DatatypeProperty/
         end
 
-        # Get max depth from the metrics.csv file which is already generated
-        # by owlapi_wrapper when new submission of UMLS ontology is created.
-        # Ruby code/sparql for calculating max_depth fails for large UMLS
-        # ontologies with AllegroGraph backend
         metrics_from_owlapi = @submission.metrics_from_file
         max_depth = metrics_from_owlapi[1][3] unless metrics_from_owlapi.empty?
 
-        generate_metrics_file(class_count, indiv_count, prop_count, max_depth, 0, 0, 0, 0)
+        generate_metrics_file(class_count, indiv_count, prop_count, max_depth)
       end
 
       private
@@ -56,63 +52,28 @@ module LinkedData
         @submission
       end
 
+      def ontolex_submission?
+        @submission.bring(:hasOntologyLanguage) if @submission.bring?(:hasOntologyLanguage)
+        lang = @submission.hasOntologyLanguage
+        lang.to_s.upcase == 'ONTOLEX'
+      rescue StandardError
+        false
+      end
+
       def metrics_for_submission(logger)
         logger.info('metrics_for_submission start')
         logger.flush
         begin
           @submission.bring(:submissionStatus) if @submission.bring?(:submissionStatus)
-          cls_metrics = LinkedData::Metrics.class_metrics(@submission, logger)
-          logger.info('class_metrics finished')
-          logger.flush
           metrics = LinkedData::Models::Metric.new
 
-          cls_metrics.each do |k, v|
-            unless v.instance_of?(Integer)
-              begin
-                v = Integer(v)
-              rescue ArgumentError
-                v = 0
-              rescue TypeError
-                v = 0
-              end
-            end
-            metrics.send("#{k}=", v)
-          end
-          indiv_count = LinkedData::Metrics.number_individuals(logger, @submission)
-          metrics.individuals = indiv_count
-          logger.info('individuals finished')
-          logger.flush
-          prop_count = LinkedData::Metrics.number_properties(logger, @submission)
-          metrics.properties = prop_count
-          logger.info('properties finished')
-          logger.flush
-
-          # OntoLex counts
-          ontolex_entries = 0
-          ontolex_forms = 0
-          ontolex_senses = 0
-          ontolex_concepts = 0
-          begin
-            ontolex_entries = LinkedData::Models::OntoLex::LexicalEntry.count_in_submission(@submission)
-            ontolex_forms   = LinkedData::Models::OntoLex::Form.count_in_submission(@submission)
-            ontolex_senses  = LinkedData::Models::OntoLex::LexicalSense.count_in_submission(@submission)
-            ontolex_concepts = LinkedData::Models::OntoLex::LexicalConcept.count_in_submission(@submission)
-            metrics.ontolexEntries = ontolex_entries
-            metrics.ontolexForms   = ontolex_forms
-            metrics.ontolexSenses  = ontolex_senses
-            metrics.ontolexConcepts = ontolex_concepts
-            logger.info('ontolex metrics finished')
-            logger.flush
-          rescue StandardError => e
-            logger.error("Error computing OntoLex metrics: #{e.message}")
-            logger.flush
+          if ontolex_submission?
+            logger.info('OntoLex submission detected, computing OntoLex-specific metrics')
+            compute_ontolex_metrics(metrics, logger)
+          else
+            compute_standard_metrics(metrics, logger)
           end
 
-          # re-generate metrics file
-          generate_metrics_file(cls_metrics[:classes], indiv_count, prop_count, cls_metrics[:maxDepth],
-                                ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts)
-          logger.info('generation of metrics file finished')
-          logger.flush
         rescue StandardError => e
           logger.error(e.message)
           logger.error(e)
@@ -122,13 +83,136 @@ module LinkedData
         metrics
       end
 
+      # ---------------------------------------------------------------------------
+      # Standard OWL/SKOS metrics (unchanged behaviour)
+      # ---------------------------------------------------------------------------
+      def compute_standard_metrics(metrics, logger)
+        cls_metrics = LinkedData::Metrics.class_metrics(@submission, logger)
+        logger.info('class_metrics finished'); logger.flush
+
+        cls_metrics.each do |k, v|
+          unless v.instance_of?(Integer)
+            begin; v = Integer(v)
+            rescue ArgumentError, TypeError; v = 0
+            end
+          end
+          metrics.send("#{k}=", v)
+        end
+
+        indiv_count = LinkedData::Metrics.number_individuals(logger, @submission)
+        metrics.individuals = indiv_count
+        logger.info('individuals finished'); logger.flush
+
+        prop_count = LinkedData::Metrics.number_properties(logger, @submission)
+        metrics.properties = prop_count
+        logger.info('properties finished'); logger.flush
+
+        generate_metrics_file(
+          cls_metrics[:classes], indiv_count, prop_count, cls_metrics[:maxDepth]
+        )
+        logger.info('generation of metrics file finished'); logger.flush
+        metrics
+      end
+
+      # ---------------------------------------------------------------------------
+      # OntoLex-specific metrics
+      # ---------------------------------------------------------------------------
+      def compute_ontolex_metrics(metrics, logger)
+        entries_count   = safe_count(logger, 'ontolexEntries')   { LinkedData::Models::OntoLex::LexicalEntry.count_in_submission(@submission) }
+        forms_count     = safe_count(logger, 'ontolexForms')     { LinkedData::Models::OntoLex::Form.count_in_submission(@submission) }
+        senses_count    = safe_count(logger, 'ontolexSenses')    { LinkedData::Models::OntoLex::LexicalSense.count_in_submission(@submission) }
+        concepts_count  = safe_count(logger, 'ontolexConcepts')  { LinkedData::Models::OntoLex::LexicalConcept.count_in_submission(@submission) }
+        translations    = safe_count(logger, 'ontolexTranslations') { count_translations }
+        languages       = safe_count(logger, 'ontolexLanguages')    { count_distinct_languages }
+
+        metrics.ontolexEntries      = entries_count
+        metrics.ontolexForms        = forms_count
+        metrics.ontolexSenses       = senses_count
+        metrics.ontolexConcepts     = concepts_count
+        metrics.ontolexTranslations = translations
+        metrics.ontolexLanguages    = languages
+
+        # Zero-out standard OWL fields so they don't pollute the display
+        metrics.classes                    = 0
+        metrics.individuals                = 0
+        metrics.properties                 = 0
+        metrics.maxDepth                   = 0
+        metrics.maxChildCount              = 0
+        metrics.averageChildCount          = 0
+        metrics.classesWithOneChild        = 0
+        metrics.classesWithMoreThan25Children = 0
+        metrics.classesWithNoDefinition    = 0
+
+        logger.info('OntoLex metrics finished'); logger.flush
+
+        generate_metrics_file(
+          0, 0, 0, 0,
+          entries_count, forms_count, senses_count, concepts_count,
+          translations, languages
+        )
+        metrics
+      end
+
+      # Count total translation links across all senses.
+      # LexicalSense#translation is a list of related LexicalSense objects.
+      def count_translations
+        total = 0
+        page  = 1
+        size  = 500
+        loop do
+          batch = LinkedData::Models::OntoLex::LexicalSense
+                    .in(@submission)
+                    .include(:translation)
+                    .page(page, size)
+                    .all
+          break if batch.empty?
+          batch.each { |sense| total += Array(sense.translation).size }
+          break if batch.size < size
+          page += 1
+        end
+        total
+      end
+
+      # Count distinct language URIs across all LexicalEntries.
+      # language is stored as a URI, e.g. http://lexvo.org/id/iso639-3/cat
+      def count_distinct_languages
+        languages = Set.new
+        page = 1
+        size = 500
+        loop do
+          batch = LinkedData::Models::OntoLex::LexicalEntry
+                    .in(@submission)
+                    .include(:language)
+                    .page(page, size)
+                    .all
+          break if batch.empty?
+          batch.each do |entry|
+            Array(entry.language).each { |lang| languages.add(lang.to_s) unless lang.to_s.empty? }
+          end
+          break if batch.size < size
+          page += 1
+        end
+        languages.size
+      end
+
+      def safe_count(logger, name)
+        yield
+      rescue StandardError => e
+        logger.error("Error computing #{name}: #{e.message}")
+        0
+      end
+
       def generate_metrics_file(class_count, indiv_count, prop_count, max_depth,
-                                ontolex_entries = 0, ontolex_forms = 0, ontolex_senses = 0, ontolex_concepts = 0)
+                                ontolex_entries = 0, ontolex_forms = 0,
+                                ontolex_senses = 0, ontolex_concepts = 0,
+                                ontolex_translations = 0, ontolex_languages = 0)
         CSV.open(@submission.metrics_path, 'wb') do |csv|
           csv << ['Class Count', 'Individual Count', 'Property Count', 'Max Depth',
-                  'OntoLex Entries', 'OntoLex Forms', 'OntoLex Senses', 'OntoLex Concepts']
+                  'OntoLex Entries', 'OntoLex Forms', 'OntoLex Senses', 'OntoLex Concepts',
+                  'OntoLex Translations', 'OntoLex Languages']
           csv << [class_count, indiv_count, prop_count, max_depth,
-                  ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts]
+                  ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts,
+                  ontolex_translations, ontolex_languages]
         end
       end
     end
