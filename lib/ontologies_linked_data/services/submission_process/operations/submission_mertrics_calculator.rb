@@ -55,7 +55,10 @@ module LinkedData
       def ontolex_submission?
         @submission.bring(:hasOntologyLanguage) if @submission.bring?(:hasOntologyLanguage)
         lang = @submission.hasOntologyLanguage
-        lang.to_s.upcase == 'ONTOLEX'
+        return false unless lang
+        lang.bring(:acronym) if lang.respond_to?(:bring) && lang.bring?(:acronym)
+        acronym = lang.respond_to?(:acronym) ? lang.acronym.to_s : lang.to_s
+        acronym.upcase == 'ONTOLEX'
       rescue StandardError
         false
       end
