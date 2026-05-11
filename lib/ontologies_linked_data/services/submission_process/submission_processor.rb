@@ -84,14 +84,13 @@ module LinkedData
         logger.error("Email sending failed: #{e.message}\n#{e.backtrace.join("\n\t")}"); logger.flush
       end
 
-      # Bubastis only supports OWL format ontologies.
       def bubastis_supported?
         @submission.bring(:hasOntologyLanguage) if @submission.bring?(:hasOntologyLanguage)
         lang = @submission.hasOntologyLanguage
         return true unless lang
         lang.bring(:acronym) if lang.respond_to?(:bring) && lang.bring?(:acronym)
         acronym = lang.respond_to?(:acronym) ? lang.acronym.to_s.upcase : lang.to_s.upcase
-        %w[OWL OWL2 OWLAPI].include?(acronym)
+        acronym == 'OWL'
       rescue StandardError
         true
       end

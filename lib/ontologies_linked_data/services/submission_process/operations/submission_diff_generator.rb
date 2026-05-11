@@ -23,7 +23,23 @@ module LinkedData
           File.expand_path(@submission.data_folder.to_s))
       end
 
+      def bubastis_supported?
+        @submission.bring(:hasOntologyLanguage) if @submission.bring?(:hasOntologyLanguage)
+        lang = @submission.hasOntologyLanguage
+        return true unless lang
+        lang.bring(:acronym) if lang.respond_to?(:bring) && lang.bring?(:acronym)
+        acronym = lang.respond_to?(:acronym) ? lang.acronym.to_s.upcase : lang.to_s.upcase
+        acronym == 'OWL'
+      rescue StandardError
+        true
+      end
+
       def process_diff(logger)
+        if !bubastis_supported?
+          logger.info("Diff process: skipping diff for unsupported ontology #{@submission.id}.")
+          return
+        end
+
         status = LinkedData::Models::SubmissionStatus.find('DIFF').first
         # Get previous submission from ontology.submissions
         @submission.ontology.bring(:submissions)
@@ -83,5 +99,3 @@ module LinkedData
     end
   end
 end
-
-
