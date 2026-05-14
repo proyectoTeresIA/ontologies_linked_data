@@ -21,10 +21,10 @@ module Mappings
       predicates = {}
       predicates["SKOS:EXACT_MATCH"] = ["http://www.w3.org/2004/02/skos/core#exactMatch"]
       predicates["SKOS:CLOSE_MATCH"] = ["http://www.w3.org/2004/02/skos/core#closeMatch"]
-      predicates["SKOS:BROAD_MATH"] = ["http://www.w3.org/2004/02/skos/core#broadMatch"]
-      predicates["SKOS:NARROW_MATH"] = ["http://www.w3.org/2004/02/skos/core#narrowMatch"]
-      predicates["SKOS:RELATED_MATH"] = ["http://www.w3.org/2004/02/skos/core#relatedMatch"]
-
+      predicates["SKOS:BROAD_MATCH"] = ["http://www.w3.org/2004/02/skos/core#broadMatch"]
+      predicates["SKOS:NARROW_MATCH"] = ["http://www.w3.org/2004/02/skos/core#narrowMatch"]
+      predicates["SKOS:RELATED_MATCH"] = ["http://www.w3.org/2004/02/skos/core#relatedMatch"]
+      predicates["SKOS:RELATED"] = ["http://www.w3.org/2004/02/skos/core#related"]
       return predicates
     end
 
@@ -148,6 +148,69 @@ eos
         end
       end
     end #per predicate query
+
+    # Directional SKOS predicates: count ?s1 in sub1 with a SKOS link to a subject in another graph
+    skos_template = <<-eos
+{
+  GRAPH <#{sub1.id.to_s}> {
+    ?s1 <predicate> ?o .
+  }
+  GRAPH graph {
+    ?o ?skos_p ?skos_v .
+  }
+}
+eos
+
+    internal_mapping_predicates.each do |_skos_source, skos_predicate|
+      block = skos_template.gsub("predicate", skos_predicate[0])
+      query_template = <<-eos
+      SELECT variables
+      WHERE {
+      block
+      filter
+      } group
+      eos
+      query = query_template.sub("block", block)
+      filter = 'FILTER (?s1 != ?o)'
+
+      if sub2.nil?
+        ont_id = sub1.id.to_s.split("/")[0..-3].join("/")
+        filter += "\nFILTER (!STRSTARTS(str(?g),'#{ont_id}'))"
+        query = query.sub("graph", "?g")
+        query = query.sub("filter", filter)
+        query = query.sub("variables", "?g (count(DISTINCT ?s1) as ?c)")
+        query = query.sub("group", "GROUP BY ?g")
+      else
+        query = query.sub("graph", "<#{sub2.id.to_s}>")
+        query = query.sub("filter", filter)
+        query = query.sub("variables", "(count(DISTINCT ?s1) as ?c)")
+        query = query.sub("group", "")
+      end
+      graphs = [sub1.id, LinkedData::Models::MappingProcess.type_uri]
+      graphs << sub2.id unless sub2.nil?
+
+      if sub2.nil?
+        latest_sub_ids.each_value do |sub_uri|
+          graphs << RDF::URI.new(sub_uri) unless sub_uri == sub1.id.to_s
+        end
+        solutions = epr.query(query, graphs: graphs, reload_cache: reload_cache)
+
+        solutions.each do |sol|
+          acr = sol[:g].to_s.split("/")[-3]
+          next unless latest_sub_ids[acr] == sol[:g].to_s
+
+          if group_count[acr].nil?
+            group_count[acr] = 0
+          end
+          group_count[acr] += sol[:c].object
+        end
+      else
+        solutions = epr.query(query, graphs: graphs)
+        solutions.each do |sol|
+          count += sol[:c].object
+        end
+      end
+    end #per SKOS predicate
 
     if sub2.nil?
       return group_count
@@ -744,6 +807,118 @@ GROUP BY ?ontology
     # fsave.close
   end
 
+    def self.ontolex_mappings_for_concept(submission, concept_id, page, size)
+      epr    = Goo.sparql_query_client(:main)
+      graph  = submission.id.to_s
+      ont_id = graph.split("/")[0..-3].join("/")
+      latest = retrieve_latest_submission_ids
+
+      subject = concept_id ? "<#{concept_id}>" : "?concept"
+
+      predicate_blocks = internal_mapping_predicates.map do |label, pred|
+        <<-SPARQL
+        {
+          GRAPH <#{graph}> { #{subject} <#{pred}> ?target . }
+          BIND(<#{pred}> AS ?predicate)
+          BIND("#{label}" AS ?rel_type)
+        }
+        SPARQL
+      end.join("UNION\n")
+
+      count_query = <<-SPARQL
+SELECT (COUNT(*) AS ?c)
+WHERE {
+  #{predicate_blocks}
+  FILTER(!STRSTARTS(str(?target), "#{ont_id}"))
+}
+      SPARQL
+
+      total = 0
+      epr.query(count_query).each { |sol| total = sol[:c].object.to_i }
+      return empty_page(page, size) if total == 0
+
+      offset = (page - 1) * size
+      limit  = size > 0 ? "LIMIT #{size} OFFSET #{offset}" : ""
+
+      query = <<-SPARQL
+SELECT DISTINCT ?target ?rel_type ?predicate ?prefLabel ?targetGraph
+WHERE {
+  #{predicate_blocks}
+  FILTER(!STRSTARTS(str(?target), "#{ont_id}"))
+  OPTIONAL {
+    ?targetGraph a ?anything .
+    FILTER(STRSTARTS(str(?targetGraph), str(?target)))
+  }
+  OPTIONAL {
+    GRAPH ?anyGraph {
+      ?target <http://www.w3.org/2004/02/skos/core#prefLabel> ?prefLabel .
+    }
+  }
+} #{limit}
+      SPARQL
+
+      mappings = []
+      epr.query(query).each do |sol|
+        target_uri   = sol[:target].to_s
+        target_graph = sol[:targetGraph]&.to_s
+
+        unless target_graph
+          latest.each_value do |sub_uri|
+            next if sub_uri == graph
+            candidate_acr = sub_uri.split("/")[-3]
+            target_graph = sub_uri if target_uri.include?(candidate_acr)
+          end
+        end
+
+        target_acr = target_graph ? target_graph.split("/")[-3] : nil
+        target_submission_uri = target_graph || target_uri
+
+        source_obj = LinkedData::Models::OntoLex::LexicalConcept.read_only(
+          id: RDF::URI.new(concept_id),
+          submission: submission
+        )
+        target_ont = LinkedData::Models::Ontology.read_only(
+          id: RDF::IRI.new(target_submission_uri.split("/submissions/").first),
+          acronym: target_acr
+        ) if target_acr
+        target_sub = LinkedData::Models::OntologySubmission.read_only(
+          id: RDF::IRI.new(target_submission_uri),
+          ontology: target_ont
+        )
+        target_obj = LinkedData::Models::OntoLex::LexicalConcept.read_only(
+          id: RDF::URI.new(target_uri),
+          submission: target_sub,
+          prefLabel: sol[:prefLabel]&.to_s
+        )
+
+        mappings << LinkedData::Models::Mapping.new(
+          [source_obj, target_obj],
+          sol[:rel_type].to_s
+        )
+      end
+
+      page_obj = Goo::Base::Page.new(page, size > 0 ? size : total, total, mappings)
+      page_obj
+    end
+
+    def self.ontolex_mapping_count_for_submission(submission)
+      graph  = submission.id.to_s
+      ont_id = graph.split("/")[0..-3].join("/")
+      epr    = Goo.sparql_query_client(:main)
+
+      predicate_values = internal_mapping_predicates.values.map { |p| "<#{p}>" }.join(" ")
+      query = <<-SPARQL
+SELECT (COUNT(DISTINCT ?target) AS ?c)
+WHERE {
+  GRAPH <#{graph}> { ?concept ?pred ?target . }
+  VALUES ?pred { #{predicate_values} }
+  FILTER(!STRSTARTS(str(?target), "#{ont_id}"))
+}
+      SPARQL
+
+      epr.query(query).map { |sol| sol[:c].object.to_i }.first || 0
+    end
+
     private
 
     def self.get_mapping_classes_instance(s1, graph1, s2, graph2)
@@ -764,12 +939,11 @@ GROUP BY ?ontology
 
 
 
-      filter = class_id.nil? ? "FILTER ((?s1 != ?s2) || (?source = 'SAME_URI'))" : ''
-      if sub2.nil?
-        
-        class_id_subject = class_id.nil? ? '?s1' :  "<#{class_id.to_s}>"
-        source_graph = sub1.nil? ? '?g' :  "<#{sub1.to_s}>"
-        internal_mapping_predicates.each do |_source, predicate|
+      class_id_subject = class_id.nil? ? '?s1' : "<#{class_id.to_s}>"
+      source_graph     = sub1.nil? ? '?g' : "<#{sub1.to_s}>"
+
+      internal_mapping_predicates.each do |_source, predicate|
+        if sub2.nil?
           blocks << <<-eos
         {
           GRAPH #{source_graph} {
@@ -780,12 +954,25 @@ GROUP BY ?ontology
           BIND ('#{_source}' AS ?source)
         }
           eos
+        else
+          blocks << <<-eos
+        {
+          GRAPH #{source_graph} {
+            #{class_id_subject} <#{predicate[0]}> ?s2 .
+          }
+          GRAPH <#{sub2.to_s}> {
+            ?s2 ?skos_p_var ?skos_o_var .
+          }
+          BIND(?s2 AS ?o)
+          BIND ('#{_source}' AS ?source)
+        }
+          eos
         end
+      end
 
+      filter = class_id.nil? ? "FILTER ((?s1 != ?s2) || (?source = 'SAME_URI'))" : ''
+      if sub2.nil?
         ont_id = sub1.to_s.split("/")[0..-3].join("/")
-        #STRSTARTS is used to not count older graphs
-        #no need since now we delete older graphs
-
         filter += "\nFILTER (!STRSTARTS(str(?g),'#{ont_id}')"
         filter += " || " + internal_mapping_predicates.keys.map{|x| "(?source = '#{x}')"}.join('||')
         filter += ")"
@@ -855,4 +1042,3 @@ WHERE {
 
   end
 end
-
