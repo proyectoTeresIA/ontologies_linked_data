@@ -225,6 +225,19 @@ module LinkedData
           logger.info("Using #{num_lex_threads} thread(s) for OntoLex form indexing.")
           logger.flush
 
+          # Pre-fetch all LexicalEntries, LexicalConcepts and subject prefLabels
+          # for this submission in bulk so that indexBatch can build Solr docs
+          # from the in-memory cache.
+          begin
+            t_pre = Time.now
+            LinkedData::Models::OntoLex::Form.prefetch_enrichment!(@submission)
+            logger.info("OntoLex enrichment pre-fetched in #{(Time.now - t_pre).round(2)}s")
+            logger.flush
+          rescue StandardError => e
+            logger.warn("Could not pre-fetch OntoLex enrichment (#{e.class}: #{e.message}) — falling back to per-form queries")
+            logger.flush
+          end
+
           # Each thread gets its own paging object so SPARQL fetches run in
           # parallel against the triple store rather than sequentially.
           lex_page_mutex       = Mutex.new
@@ -281,6 +294,8 @@ module LinkedData
         rescue StandardError => e
           logger.error("Error indexing OntoLex forms for #{@submission.ontology.acronym}: #{e.class}: #{e.message}\n#{e.backtrace.join("\n\t")}")
           logger.flush
+        ensure
+          LinkedData::Models::OntoLex::Form.clear_enrichment!(@submission)
         end
       end
     end
