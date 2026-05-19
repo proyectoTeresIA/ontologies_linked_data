@@ -23,6 +23,8 @@ module LinkedData
       attribute :ontolexForms, enforce: [:integer]
       attribute :ontolexSenses, enforce: [:integer]
       attribute :ontolexConcepts, enforce: [:integer]
+      attribute :ontolexTranslations, enforce: [:integer]
+      attribute :ontolexLanguages, enforce: [:integer]
 
       cache_timeout 14400 # 4 hours
 

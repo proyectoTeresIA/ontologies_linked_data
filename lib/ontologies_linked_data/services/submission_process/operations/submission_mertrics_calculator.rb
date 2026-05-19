@@ -26,7 +26,7 @@ module LinkedData
         metrics_from_owlapi = @submission.metrics_from_file
         max_depth = metrics_from_owlapi[1][3] unless metrics_from_owlapi.empty?
 
-        generate_metrics_file(class_count, indiv_count, prop_count, max_depth, 0, 0, 0, 0)
+        generate_metrics_file(class_count, indiv_count, prop_count, max_depth, 0, 0, 0, 0, 0, 0)
       end
 
       private
@@ -92,15 +92,21 @@ module LinkedData
           ontolex_forms = 0
           ontolex_senses = 0
           ontolex_concepts = 0
+          ontolex_translations = 0
+          ontolex_languages = 0
           begin
             ontolex_entries = LinkedData::Models::OntoLex::LexicalEntry.count_in_submission(@submission)
             ontolex_forms   = LinkedData::Models::OntoLex::Form.count_in_submission(@submission)
             ontolex_senses  = LinkedData::Models::OntoLex::LexicalSense.count_in_submission(@submission)
             ontolex_concepts = LinkedData::Models::OntoLex::LexicalConcept.count_in_submission(@submission)
+            ontolex_translations = count_ontolex_translations(@submission)
+            ontolex_languages = count_ontolex_languages(@submission)
             metrics.ontolexEntries = ontolex_entries
             metrics.ontolexForms   = ontolex_forms
             metrics.ontolexSenses  = ontolex_senses
             metrics.ontolexConcepts = ontolex_concepts
+            metrics.ontolexTranslations = ontolex_translations
+            metrics.ontolexLanguages = ontolex_languages
             logger.info('ontolex metrics finished')
             logger.flush
           rescue StandardError => e
@@ -110,7 +116,8 @@ module LinkedData
 
           # re-generate metrics file
           generate_metrics_file(cls_metrics[:classes], indiv_count, prop_count, cls_metrics[:maxDepth],
-                                ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts)
+                                ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts,
+                                ontolex_translations, ontolex_languages)
           logger.info('generation of metrics file finished')
           logger.flush
         rescue StandardError => e
@@ -123,13 +130,81 @@ module LinkedData
       end
 
       def generate_metrics_file(class_count, indiv_count, prop_count, max_depth,
-                                ontolex_entries = 0, ontolex_forms = 0, ontolex_senses = 0, ontolex_concepts = 0)
+                                ontolex_entries = 0, ontolex_forms = 0, ontolex_senses = 0, ontolex_concepts = 0,
+                                ontolex_translations = 0, ontolex_languages = 0)
         CSV.open(@submission.metrics_path, 'wb') do |csv|
           csv << ['Class Count', 'Individual Count', 'Property Count', 'Max Depth',
-                  'OntoLex Entries', 'OntoLex Forms', 'OntoLex Senses', 'OntoLex Concepts']
+                  'OntoLex Entries', 'OntoLex Forms', 'OntoLex Senses', 'OntoLex Concepts',
+                  'OntoLex Translations', 'OntoLex Languages']
           csv << [class_count, indiv_count, prop_count, max_depth,
-                  ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts]
+                  ontolex_entries, ontolex_forms, ontolex_senses, ontolex_concepts,
+                  ontolex_translations, ontolex_languages]
         end
+      end
+
+      def count_ontolex_translations(submission)
+        query = <<~SPARQL
+          PREFIX vartrans: <http://www.w3.org/ns/lemon/vartrans#>
+          SELECT (COUNT(DISTINCT ?target) AS ?count) WHERE {
+            GRAPH <#{submission.id}> {
+              ?sense vartrans:translation ?target .
+            }
+          }
+        SPARQL
+        run_count_query(query)
+      end
+
+      def count_ontolex_languages(submission)
+        query = <<~SPARQL
+          PREFIX ontolex: <http://www.w3.org/ns/lemon/ontolex#>
+          PREFIX lemon: <http://lemon-model.net/lemon#>
+          PREFIX dcterms: <http://purl.org/dc/terms/>
+
+          SELECT (COUNT(DISTINCT ?lang) AS ?count) WHERE {
+            GRAPH <#{submission.id}> {
+              {
+                ?form a ontolex:Form .
+                { ?form ontolex:writtenRep ?rep } UNION { ?form lemon:writtenRep ?rep } .
+                BIND(LCASE(LANG(?rep)) AS ?lang)
+                FILTER(STRLEN(?lang) > 0)
+              }
+              UNION
+              {
+                FILTER NOT EXISTS {
+                  ?anyForm a ontolex:Form .
+                  { ?anyForm ontolex:writtenRep ?anyRep } UNION { ?anyForm lemon:writtenRep ?anyRep } .
+                  FILTER(STRLEN(LANG(?anyRep)) > 0)
+                }
+
+                {
+                  ?entry a ontolex:LexicalEntry .
+                  ?entry dcterms:language ?langValue .
+                }
+                UNION
+                {
+                  ?form a ontolex:Form .
+                  ?form dcterms:language ?langValue .
+                }
+
+                # Normalize URI/literal language values to a compact code-like token.
+                # Example: http://lexvo.org/id/iso639-3/spa -> spa
+                BIND(LCASE(REPLACE(STR(?langValue), '^.*[\\/#]', '')) AS ?lang)
+                FILTER(STRLEN(?lang) > 0)
+              }
+            }
+          }
+        SPARQL
+        run_count_query(query)
+      end
+
+      def run_count_query(query)
+        rs = Goo.sparql_query_client.query(query)
+        rs.each do |sol|
+          return sol[:count].object.to_i
+        end
+        0
+      rescue StandardError
+        0
       end
     end
   end
