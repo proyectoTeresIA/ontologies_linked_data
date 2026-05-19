@@ -256,7 +256,7 @@ module LinkedData
         artifacts[:mapping_triples].concat(rest_mappings)
 
         if artifacts[:label_triples].length > 0
-          logger.info("Asserting #{artifacts[:label_triples].length} labels in " +
+          logger.debug("Asserting #{artifacts[:label_triples].length} labels in " +
                         "#{@submission.id.to_ntriples}")
           logger.flush
           artifacts[:label_triples] = artifacts[:label_triples].join("\n")
@@ -264,15 +264,15 @@ module LinkedData
           t0 = Time.now
           Goo.sparql_data_client.append_triples(@submission.id, artifacts[:label_triples], mime_type = "application/x-turtle")
           t1 = Time.now
-          logger.info("Labels asserted in #{t1 - t0} sec.")
+          logger.debug("Labels asserted in #{t1 - t0} sec.")
           logger.flush
         else
-          logger.info("No labels generated in page #{page}.")
+          logger.debug("No labels generated in page #{page}.")
           logger.flush
         end
 
         if artifacts[:mapping_triples].length > 0
-          logger.info("Asserting #{artifacts[:mapping_triples].length} mappings in " +
+          logger.debug("Asserting #{artifacts[:mapping_triples].length} mappings in " +
                         "#{@submission.id.to_ntriples}")
           logger.flush
           artifacts[:mapping_triples] = artifacts[:mapping_triples].join("\n")
@@ -281,14 +281,14 @@ module LinkedData
           t0 = Time.now
           Goo.sparql_data_client.append_triples(@submission.id, artifacts[:mapping_triples], mime_type = "application/x-turtle")
           t1 = Time.now
-          logger.info("Mapping labels asserted in #{t1 - t0} sec.")
+          logger.debug("Mapping labels asserted in #{t1 - t0} sec.")
           logger.flush
         end
       end
 
       def generate_missing_labels_post(artifacts = {}, logger, pagging)
-        logger.info("end generate_missing_labels traversed #{artifacts[:count_classes]} classes")
-        logger.info("Saved generated labels in #{artifacts[:save_in_file]}")
+        logger.debug("end generate_missing_labels traversed #{artifacts[:count_classes]} classes")
+        logger.debug("Saved generated labels in #{artifacts[:save_in_file]}")
         artifacts[:fsave].close()
         artifacts[:fsave_mappings].close()
         logger.flush
@@ -423,9 +423,12 @@ module LinkedData
         attempt = 0
         begin
           attempt += 1
+          if attempt == 1
+            logger.info("Uploading triples to Fuseki for #{@submission.id.to_ntriples} from #{triples_file_path}")
+          end
           Goo.sparql_data_client.delete_graph(@submission.id)
           Goo.sparql_data_client.put_triples(@submission.id, triples_file_path, mime_type)
-          logger.info("Triples #{triples_file_path} appended in #{@submission.id.to_ntriples}")
+          logger.debug("Triples #{triples_file_path} appended in #{@submission.id.to_ntriples}")
           logger.flush
         rescue RestClient::ExceptionWithResponse => e
           body = e.response&.body rescue nil
@@ -434,7 +437,7 @@ module LinkedData
           logger.flush
           if attempt < max_retries
             sleep_time = 2 ** attempt
-            logger.info("Retrying upload in #{sleep_time} seconds...")
+            logger.warn("Retrying upload in #{sleep_time} seconds...")
             sleep(sleep_time)
             retry
           end

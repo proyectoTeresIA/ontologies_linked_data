@@ -1,6 +1,14 @@
 module LinkedData
   module Services
     class SubmissionMetricsCalculator < OntologySubmissionProcess
+      ISO639_3_TO_1 = {
+        'spa' => 'es',
+        'eng' => 'en',
+        'cat' => 'ca',
+        'glg' => 'gl',
+        'eus' => 'eu'
+      }.freeze
+
       def process(logger, options = nil)
         process_metrics(logger)
       end
@@ -155,46 +163,72 @@ module LinkedData
       end
 
       def count_ontolex_languages(submission)
-        query = <<~SPARQL
-          PREFIX ontolex: <http://www.w3.org/ns/lemon/ontolex#>
-          PREFIX lemon: <http://lemon-model.net/lemon#>
-          PREFIX dcterms: <http://purl.org/dc/terms/>
+        langs = Set.new
 
-          SELECT (COUNT(DISTINCT ?lang) AS ?count) WHERE {
-            GRAPH <#{submission.id}> {
-              {
-                ?form a ontolex:Form .
-                { ?form ontolex:writtenRep ?rep } UNION { ?form lemon:writtenRep ?rep } .
-                BIND(LCASE(LANG(?rep)) AS ?lang)
-                FILTER(STRLEN(?lang) > 0)
-              }
-              UNION
-              {
-                FILTER NOT EXISTS {
-                  ?anyForm a ontolex:Form .
-                  { ?anyForm ontolex:writtenRep ?anyRep } UNION { ?anyForm lemon:writtenRep ?anyRep } .
-                  FILTER(STRLEN(LANG(?anyRep)) > 0)
-                }
+        # Prefer languages from writtenRep literals and explicit language attributes on forms.
+        forms = LinkedData::Models::OntoLex::Form.in(submission).include(:writtenRep, :language).all
+        forms.each do |form|
+          extract_language_tokens(form.writtenRep, literal_map: true).each { |lang| langs << lang }
+          extract_language_tokens(form.language).each { |lang| langs << lang }
+        end
 
-                {
-                  ?entry a ontolex:LexicalEntry .
-                  ?entry dcterms:language ?langValue .
-                }
-                UNION
-                {
-                  ?form a ontolex:Form .
-                  ?form dcterms:language ?langValue .
-                }
+        # Fallback: if forms did not yield languages, inspect lexical entries.
+        if langs.empty?
+          entries = LinkedData::Models::OntoLex::LexicalEntry.in(submission).include(:language).all
+          entries.each do |entry|
+            extract_language_tokens(entry.language).each { |lang| langs << lang }
+          end
+        end
 
-                # Normalize URI/literal language values to a compact code-like token.
-                # Example: http://lexvo.org/id/iso639-3/spa -> spa
-                BIND(LCASE(REPLACE(STR(?langValue), '^.*[\\/#]', '')) AS ?lang)
-                FILTER(STRLEN(?lang) > 0)
-              }
-            }
-          }
-        SPARQL
-        run_count_query(query)
+        langs.length
+      rescue StandardError
+        0
+      end
+
+      def extract_language_tokens(value, literal_map: false)
+        return [] if value.nil?
+
+        case value
+        when Hash
+          langs = []
+          value.each do |k, v|
+            # writtenRep is commonly a map lang=>literal(s); when literal_map=true
+            # we only consume hash keys to avoid counting literal values as languages.
+            langs << normalize_lang_token(k) unless k.to_s.empty?
+            langs.concat(extract_language_tokens(v, literal_map: false)) unless literal_map
+          end
+          langs.compact.uniq
+        when Array
+          return [] if literal_map
+
+          value.flat_map { |v| extract_language_tokens(v, literal_map: false) }.compact.uniq
+        else
+          return [] if literal_map
+
+          if value.respond_to?(:language) && value.language
+            [normalize_lang_token(value.language)].compact
+          else
+            [normalize_lang_token(value.to_s)].compact
+          end
+        end
+      end
+
+      def normalize_lang_token(raw)
+        token = raw.to_s.strip.downcase
+        return nil if token.empty?
+
+        # Ignore non-language placeholders.
+        return nil if %w[none all und].include?(token)
+
+        # Support URI values like http://lexvo.org/id/iso639-3/spa
+        token = token.split(/[\/#]/).last if token.include?('/') || token.include?('#')
+        return nil if token.nil? || token.empty?
+
+        # Keep only the primary language subtag for values like es-ES
+        token = token.split('-').first
+        return nil unless token.match?(/\A[a-z]{2,3}\z/)
+
+        ISO639_3_TO_1.fetch(token, token)
       end
 
       def run_count_query(query)

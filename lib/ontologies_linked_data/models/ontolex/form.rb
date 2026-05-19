@@ -43,10 +43,16 @@ module LinkedData
         end
 
         link_to LinkedData::Hypermedia::Link.new('self', lambda { |s|
-          "ontologies/#{s.submission.ontology.acronym}/forms/#{CGI.escape(s.id.to_s)}"
+          acronym = s.send(:ontology_acronym_for_links)
+          next nil unless acronym
+
+          "ontologies/#{acronym}/forms/#{CGI.escape(s.id.to_s)}"
         }, uri_type),
                 LinkedData::Hypermedia::Link.new('ontology', lambda { |s|
-                  "ontologies/#{s.submission.ontology.acronym}"
+                  acronym = s.send(:ontology_acronym_for_links)
+                  next nil unless acronym
+
+                  "ontologies/#{acronym}"
                 }, Goo.vocabulary['Ontology'])
 
         # Grant access to all users for OntoLex entities
@@ -216,6 +222,27 @@ module LinkedData
           # Expand signed forms
           forms.each { |f| expand_form_attributes(f, submission) }
           forms
+        end
+
+        def ontology_acronym_for_links
+          sub = submission
+          return nil unless sub
+
+          # Use loaded ontology when available.
+          ontology_obj = sub.instance_variable_get(:@ontology)
+          if ontology_obj && ontology_obj.respond_to?(:acronym)
+            acronym = ontology_obj.acronym.to_s
+            return acronym unless acronym.empty?
+          end
+
+          # Fallback to parsing the submission URI: .../ontologies/:acronym/submissions/:id
+          submission_id = sub.respond_to?(:id) ? sub.id.to_s : nil
+          return nil if submission_id.nil? || submission_id.empty?
+
+          match = submission_id.match(%r{/ontologies/([^/]+)/submissions/})
+          return nil unless match
+
+          CGI.unescape(match[1])
         end
 
         def self.list_in_submission(submission, page, size, include_attrs = [])
