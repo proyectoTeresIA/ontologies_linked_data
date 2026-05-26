@@ -220,19 +220,70 @@ module LinkedData
           LinkedData::Models::Ontology.indexCommit(nil, :lexical) if commit
 
           logger.info("Indexing OntoLex forms: #{@submission.ontology.acronym}...")
-          page = 1
-          size = 1000
-          paging = LinkedData::Models::OntoLex::Form.in(@submission)
-                                                    .include(:writtenRep, :language, :gender, :number, :signedForm)
-                                                    .page(page, size)
-          forms = paging.all
-          count_lexical += forms.length
-          while forms.any?
-            LinkedData::Models::OntoLex::Form.indexBatch(forms, :lexical)
-            page += 1
-            forms = paging.page(page, size).all
-            count_lexical += forms.length
+          lex_size         = 1000
+          num_lex_threads  = LinkedData.settings.indexing_num_threads
+          logger.info("Using #{num_lex_threads} thread(s) for OntoLex form indexing.")
+          logger.flush
+
+          # Pre-fetch all LexicalEntries, LexicalConcepts and subject prefLabels
+          # for this submission in bulk so that indexBatch can build Solr docs
+          # from the in-memory cache.
+          begin
+            t_pre = Time.now
+            LinkedData::Models::OntoLex::Form.prefetch_enrichment!(@submission)
+            logger.info("OntoLex enrichment pre-fetched in #{(Time.now - t_pre).round(2)}s")
+            logger.flush
+          rescue StandardError => e
+            logger.warn("Could not pre-fetch OntoLex enrichment (#{e.class}: #{e.message}) — falling back to per-form queries")
+            logger.flush
           end
+
+          # Each thread gets its own paging object so SPARQL fetches run in
+          # parallel against the triple store rather than sequentially.
+          lex_page_mutex       = Mutex.new
+          next_lex_page        = 1
+          lex_exhausted        = false
+          lex_count_per_thread = Array.new(num_lex_threads, 0)
+
+          lex_threads = num_lex_threads.times.map do |tnum|
+            Thread.new do
+              thread_paging = LinkedData::Models::OntoLex::Form.in(@submission)
+                                  .include(:writtenRep, :language, :gender, :number, :signedForm)
+              loop do
+                my_page = lex_page_mutex.synchronize do
+                  lex_exhausted ? nil : next_lex_page.tap { next_lex_page += 1 }
+                end
+                break if my_page.nil?
+
+                begin
+                  t_fetch = Time.now
+                  RequestStore.store[:requested_lang] = :ALL
+                  forms = thread_paging.page(my_page, lex_size).all
+
+                  if forms.empty?
+                    lex_page_mutex.synchronize { lex_exhausted = true }
+                    logger.info("Thread #{tnum + 1}: Page #{my_page} empty — done.")
+                    logger.flush
+                    break
+                  end
+
+                  lex_count_per_thread[tnum] += forms.length
+                  logger.info("Thread #{tnum + 1}: Page #{my_page} — #{forms.length} forms fetched in #{(Time.now - t_fetch).round(2)}s")
+
+                  t_index = Time.now
+                  LinkedData::Models::OntoLex::Form.indexBatch(forms, :lexical)
+                  logger.info("Thread #{tnum + 1}: Page #{my_page} — indexed in #{(Time.now - t_index).round(2)}s")
+                  logger.flush
+                rescue StandardError => e
+                  logger.error("Thread #{tnum + 1}: Error on page #{my_page}: #{e.class}: #{e.message}\n#{e.backtrace.join("\n\t")}")
+                  logger.flush
+                end
+              end
+            end
+          end
+
+          lex_threads.each(&:join)
+          count_lexical += lex_count_per_thread.sum
 
           LinkedData::Models::OntoLex::Form.indexCommit(nil, :lexical) if commit
 
@@ -243,6 +294,8 @@ module LinkedData
         rescue StandardError => e
           logger.error("Error indexing OntoLex forms for #{@submission.ontology.acronym}: #{e.class}: #{e.message}\n#{e.backtrace.join("\n\t")}")
           logger.flush
+        ensure
+          LinkedData::Models::OntoLex::Form.clear_enrichment!(@submission)
         end
       end
     end

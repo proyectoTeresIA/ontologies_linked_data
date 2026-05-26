@@ -158,6 +158,39 @@ module LinkedData
           doc
         end
 
+        # ── Bulk-indexing enrichment cache ──────────────────────────────────────
+        @enrichment_mutex = Mutex.new
+        @enrichment_cache = {}
+
+        def self.prefetch_enrichment!(submission)
+          sub_id = submission.id.to_s
+          @enrichment_mutex.synchronize do
+            return if @enrichment_cache.key?(sub_id)
+            @enrichment_cache[sub_id] = build_enrichment_data(submission)
+          end
+        end
+
+        def self.clear_enrichment!(submission)
+          @enrichment_mutex.synchronize { @enrichment_cache.delete(submission.id.to_s) }
+        end
+
+        # Override Goo::Search::ClassMethods#indexBatch: when enrichment data is
+        # available, build all Solr docs in memory.
+        def self.indexBatch(collection, connection_name = :lexical)
+          return if collection.empty?
+
+          sub = collection.first&.submission
+          if sub
+            enrichment = @enrichment_mutex.synchronize { @enrichment_cache[sub.id.to_s] }
+            if enrichment
+              docs = build_docs_with_enrichment(collection, sub, enrichment)
+              Goo.search_connection(connection_name).add(docs)
+              return
+            end
+          end
+          super(collection, connection_name)
+        end
+
         # Route searches to the lexical backend (Solr core)
         def self.search(q, params = {})
           super(q, params, :lexical)
@@ -266,6 +299,123 @@ module LinkedData
           rescue StandardError => e
             puts "[Form] Error counting: #{e.message}"
             0
+          end
+        end
+
+        # Build the in-memory enrichment map for a submission:
+        #   :form_to_entries     — form_uri (String) → [LexicalEntry]
+        #   :concept_to_subjects — concept_uri (String) → [subject_uri (String)]
+        #   :subject_to_label    — subject_uri (String) → prefLabel
+        def self.build_enrichment_data(submission)
+          # One SPARQL query for all LexicalEntries with their form links
+          all_entries = LexicalEntry.in(submission)
+                                    .include(:lemma, :partOfSpeech, :evokes,
+                                             :canonicalForm, :form, :otherForm, :language)
+                                    .all
+
+          form_to_entries = Hash.new { |h, k| h[k] = [] }
+          all_entries.each do |entry|
+            Array(entry.canonicalForm).compact.each { |f| form_to_entries[f.to_s] << entry }
+            Array(entry.otherForm).compact.each     { |f| form_to_entries[f.to_s] << entry }
+            Array(entry.form).compact.each          { |f| form_to_entries[f.to_s] << entry }
+          end
+
+          # One SPARQL query for all LexicalConcepts with their subjects
+          all_concepts = LexicalConcept.in(submission).include(:subject).all
+          concept_to_subjects = {}
+          all_concepts.each do |c|
+            subjects = Array(c.subject).compact.map(&:to_s).reject(&:empty?)
+            concept_to_subjects[c.id.to_s] = subjects if subjects.any?
+          end
+
+          # One SPARQL query per unique subject URI (small set in practice)
+          all_subject_uris = concept_to_subjects.values.flatten.uniq
+          subject_to_label = {}
+          all_subject_uris.each do |subj_uri|
+            subj_class = Class.find(RDF::URI.new(subj_uri)).in(submission).include(:prefLabel).first
+            subject_to_label[subj_uri] = subj_class.prefLabel if subj_class&.prefLabel
+          end
+
+          { form_to_entries: form_to_entries,
+            concept_to_subjects: concept_to_subjects,
+            subject_to_label: subject_to_label }
+        end
+
+        # Build Solr documents from in-memory enrichment
+        def self.build_docs_with_enrichment(forms, submission, enrichment)
+          form_to_entries     = enrichment[:form_to_entries]
+          concept_to_subjects = enrichment[:concept_to_subjects]
+          subject_to_label    = enrichment[:subject_to_label]
+
+          acronym       = submission.ontology.acronym.to_s
+          submission_id = submission.id.to_s
+
+          forms.filter_map do |form|
+            next nil unless form.id
+
+            doc = {
+              id:                form.id.to_s,
+              resource_id:       form.id.to_s,
+              submissionAcronym: acronym,
+              ontologyId:        submission_id
+            }
+
+            doc[:writtenRep]      = form.writtenRep if form.writtenRep
+            doc[:writtenRepExact] = form.writtenRep if form.writtenRep
+
+            if form.language && !form.language.to_s.empty?
+              doc[:language] = form.language.to_s.split('/').last
+            end
+            doc[:gender] = form.gender.to_s.split('/').last if form.gender
+            doc[:number] = form.number.to_s.split('/').last if form.number
+
+            entries = form_to_entries[form.id.to_s]
+            if entries&.any?
+              unless doc[:language]
+                lang = entries.first.language
+                doc[:language] = lang.to_s.split('/').last if lang && !lang.to_s.empty?
+              end
+
+              lemmas = entries.map(&:lemma).compact.uniq
+              doc[:lemma]      = lemmas.first if lemmas.any?
+              doc[:lemmaExact] = lemmas.first if lemmas.any?
+
+              pos_values = entries.filter_map { |e| e.partOfSpeech.to_s.split('/').last if e.partOfSpeech }.uniq
+              if pos_values.any?
+                doc[:partOfSpeech]      = pos_values.first
+                doc[:partOfSpeechLabel] = pos_values.first.split('#').last if pos_values.first.include?('#')
+              end
+
+              form_subj_uris   = []
+              form_subj_labels = []
+              entries.each do |entry|
+                next unless entry.evokes
+
+                evokes_id = entry.evokes.is_a?(Array) ? entry.evokes.first : entry.evokes
+                next unless evokes_id
+
+                (concept_to_subjects[evokes_id.to_s] || []).each do |subj_uri|
+                  form_subj_uris << subj_uri
+                  label = subject_to_label[subj_uri]
+                  form_subj_labels << label if label
+                end
+              end
+
+              doc[:subject]        = form_subj_uris.uniq   if form_subj_uris.any?
+              doc[:subjectLabel]   = form_subj_labels.uniq if form_subj_labels.any?
+              doc[:lexicalEntries] = entries.map { |e| e.id.to_s }
+            end
+
+            if form.writtenRep
+              doc[:writtenRepSuggestEdge]  = form.writtenRep
+              doc[:writtenRepSuggestNgram] = form.writtenRep
+            end
+            if doc[:lemma]
+              doc[:lemmaSuggestEdge]  = doc[:lemma]
+              doc[:lemmaSuggestNgram] = doc[:lemma]
+            end
+
+            doc
           end
         end
       end
