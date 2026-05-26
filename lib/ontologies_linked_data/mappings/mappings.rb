@@ -94,7 +94,12 @@ eos
     latest_sub_ids = self.retrieve_latest_submission_ids
     epr = Goo.sparql_query_client(:main)
 
+    acr1 = sub1.id.to_s.split("/")[-3]
+    acr2 = sub2.nil? ? nil : sub2.id.to_s.split("/")[-3]
+    skip_loom_same_uri = is_ontolex_ontology?(acr1) || (!acr2.nil? && is_ontolex_ontology?(acr2))
+
     mapping_predicates().each do |_source, mapping_predicate|
+      next if skip_loom_same_uri && ["LOOM", "SAME_URI"].include?(_source)
       block = template.gsub("predicate", mapping_predicate[0])
       query_template = <<-eos
       SELECT variables
@@ -927,8 +932,13 @@ WHERE {
     end
 
     def self.mappings_ont_build_query(class_id, page, size, sub1, sub2)
+      acr1 = sub1.to_s.split("/")[-3]
+      acr2 = sub2.nil? ? nil : sub2.to_s.split("/")[-3]
+      skip_loom_same_uri = is_ontolex_ontology?(acr1) || (!acr2.nil? && is_ontolex_ontology?(acr2))
+
       blocks = []
       mapping_predicates.each do |_source, mapping_predicate|
+        next if skip_loom_same_uri && ["LOOM", "SAME_URI"].include?(_source)
         blocks << mappings_union_template(class_id, sub1, sub2,
                                           mapping_predicate[0],
                                           "BIND ('#{_source}' AS ?source)")
