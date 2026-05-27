@@ -51,7 +51,7 @@ module LinkedData
       # ---------------------------------------------------------------------------
       # Batch insert size constants
       # ---------------------------------------------------------------------------
-      SYNC_BATCH_SIZE    = 2000   # triples per INSERT DATA in sync_submission_graph
+      SYNC_BATCH_SIZE    = 500    # triples per INSERT DATA in sync_submission_graph
       MAPPING_BATCH_SIZE = 1000   # triples per INSERT DATA in generate_mapping_triples
 
       class << self
