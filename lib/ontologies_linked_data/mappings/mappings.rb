@@ -28,6 +28,13 @@ module Mappings
       return predicates
     end
 
+    # The three SKOS predicates used for cross-ontology term linking in OntoLex ontologies
+    SKOS_TERM_MAPPING_PREDICATES = {
+      'closeMatch' => 'http://www.w3.org/2004/02/skos/core#closeMatch',
+      'exactMatch' => 'http://www.w3.org/2004/02/skos/core#exactMatch',
+      'related'    => 'http://www.w3.org/2004/02/skos/core#related'
+    }.freeze
+
     def self.handle_triple_store_downtime(logger = nil)
       epr = Goo.sparql_query_client(:main)
       status = epr.status
@@ -60,6 +67,13 @@ module Mappings
       s_counts.each do |k,v|
         s_total += v
       end
+
+      # For OntoLex ontologies, also count SKOS cross-ontology mappings
+      if is_ontolex_ontology?(acro)
+        ontolex_count = self.ontolex_mapping_count_for_submission(sub)
+        s_total += ontolex_count
+      end
+
       counts[acro] = s_total
       i += 1
 
@@ -813,115 +827,304 @@ GROUP BY ?ontology
   end
 
     def self.ontolex_mappings_for_concept(submission, concept_id, page, size)
-      epr    = Goo.sparql_query_client(:main)
-      graph  = submission.id.to_s
-      ont_id = graph.split("/")[0..-3].join("/")
+      epr   = Goo.sparql_query_client(:main)
+      graph = submission.id.to_s
+
+      source_acr     = graph.split("/")[-3]
+      source_ont_uri = graph.split("/submissions/").first
+      source_ont_ro  = LinkedData::Models::Ontology.read_only(
+        id: RDF::IRI.new(source_ont_uri), acronym: source_acr
+      )
+      source_sub_ro  = LinkedData::Models::OntologySubmission.read_only(
+        id: RDF::IRI.new(graph), ontology: source_ont_ro
+      )
       latest = retrieve_latest_submission_ids
 
-      subject = concept_id ? "<#{concept_id}>" : "?concept"
+      # subject is the LexicalConcept — entries are found via isEvokedBy (on the concept)
+      concept_subject = concept_id ? "<#{concept_id}>" : "?concept"
 
-      predicate_blocks = internal_mapping_predicates.map do |label, pred|
-        <<-SPARQL
-        {
-          GRAPH <#{graph}> { #{subject} <#{pred}> ?target . }
-          BIND(<#{pred}> AS ?predicate)
-          BIND("#{label}" AS ?rel_type)
-        }
-        SPARQL
-      end.join("UNION\n")
+      pred_to_label = {}
+      pred_in_list  = internal_mapping_predicates.map do |label, pred|
+        uri = Array(pred).first
+        pred_to_label[uri] = label
+        "<#{uri}>"
+      end.join(", ")
 
-      count_query = <<-SPARQL
-SELECT (COUNT(*) AS ?c)
+      lc_type          = "http://www.w3.org/ns/lemon/ontolex#LexicalConcept"
+      evokes_uri       = "http://www.w3.org/ns/lemon/ontolex#evokes"
+      is_evoked_by_uri = "http://www.w3.org/ns/lemon/ontolex#isEvokedBy"
+      pref_label       = "http://www.w3.org/2004/02/skos/core#prefLabel"
+
+      # Forward query: concept→isEvokedBy→sourceEntry, concept→SKOS→target, target→isEvokedBy→targetEntry.
+      # Using isEvokedBy on the concept side captures all entries even if the entry
+      # itself does not declare the forward `ontolex:evokes` triple.
+      # Multiple source entries per concept produce multiple rows (one per pair).
+      fwd_query = <<-SPARQL
+SELECT DISTINCT ?sourceEntry ?concept ?target ?pred ?prefLabel ?targetGraph ?targetEntry ?targetIsEntry
 WHERE {
-  #{predicate_blocks}
-  FILTER(!STRSTARTS(str(?target), "#{ont_id}"))
+  GRAPH <#{graph}> { #{concept_subject} <#{is_evoked_by_uri}> ?sourceEntry . }
+  GRAPH <#{graph}> { #{concept_subject} ?pred ?target . }
+  FILTER(?pred IN (#{pred_in_list}))
+  MINUS { GRAPH <#{graph}> { ?target a <#{lc_type}> . } }
+  OPTIONAL {
+    GRAPH ?targetGraph { ?target <#{is_evoked_by_uri}> ?targetEntry . }
+    FILTER(?targetGraph != <#{graph}>)
+  }
+  OPTIONAL {
+    GRAPH ?targetGraph { ?target a <#{lc_type}> . }
+    FILTER(?targetGraph != <#{graph}>)
+  }
+  OPTIONAL {
+    GRAPH ?targetGraphB { ?target <#{evokes_uri}> ?targetIsEntry . }
+    FILTER(?targetGraphB != <#{graph}>)
+  }
+  OPTIONAL { GRAPH ?anyGraph { ?target <#{pref_label}> ?prefLabel . } }
 }
       SPARQL
 
-      total = 0
-      epr.query(count_query).each { |sol| total = sol[:c].object.to_i }
-      return empty_page(page, size) if total == 0
-
-      offset = (page - 1) * size
-      limit  = size > 0 ? "LIMIT #{size} OFFSET #{offset}" : ""
-
-      query = <<-SPARQL
-SELECT DISTINCT ?target ?rel_type ?predicate ?prefLabel ?targetGraph
+      # Reverse query: concepts in OTHER graphs map TO our concepts.
+      # concept→isEvokedBy→conceptEntry ensures we only show concepts that have entries.
+      rev_query = <<-SPARQL
+SELECT DISTINCT ?conceptEntry ?concept ?source ?pred ?sourceGraph ?sourceEntry ?sourceIsEntry ?srcLabel
 WHERE {
-  #{predicate_blocks}
-  FILTER(!STRSTARTS(str(?target), "#{ont_id}"))
-  OPTIONAL {
-    ?targetGraph a ?anything .
-    FILTER(STRSTARTS(str(?targetGraph), str(?target)))
-  }
-  OPTIONAL {
-    GRAPH ?anyGraph {
-      ?target <http://www.w3.org/2004/02/skos/core#prefLabel> ?prefLabel .
-    }
-  }
-} #{limit}
+  GRAPH <#{graph}> { #{concept_subject} <#{is_evoked_by_uri}> ?conceptEntry . }
+  GRAPH ?sourceGraph { ?source ?pred #{concept_subject} . }
+  FILTER(?pred IN (#{pred_in_list}))
+  FILTER(?sourceGraph != <#{graph}>)
+  OPTIONAL { GRAPH ?sourceGraph { ?source <#{is_evoked_by_uri}> ?sourceEntry . } }
+  OPTIONAL { GRAPH ?sourceGroupB { ?source <#{evokes_uri}> ?sourceIsEntry . } }
+  OPTIONAL { GRAPH ?anyGraph { ?source <#{pref_label}> ?srcLabel . } }
+}
       SPARQL
 
+      seen     = {}
       mappings = []
-      epr.query(query).each do |sol|
-        target_uri   = sol[:target].to_s
-        target_graph = sol[:targetGraph]&.to_s
 
+      # Process forward results
+      epr.query(fwd_query).each do |sol|
+        source_cid  = concept_id || sol[:concept]&.to_s || ''
+        src_entry   = sol[:sourceEntry]&.to_s
+        target_uri  = sol[:target].to_s
+
+        # sourceEntry is always bound (required clause) — use it directly
+        src_display = src_entry.present? ? src_entry : source_cid
+        next if src_display.empty?
+
+        # Resolve target display to its entry URI; skip if target has no entry
+        tgt_entry    = sol[:targetEntry]&.to_s
+        tgt_is_entry = sol[:targetIsEntry]&.to_s
+        if tgt_entry.present?
+          tgt_display = tgt_entry
+        elsif tgt_is_entry.present?
+          tgt_display = target_uri  # target IS already an entry (has ontolex:evokes)
+        else
+          next  # target is a concept with no lexical entries — skip
+        end
+
+        pair_key = "fwd:#{src_display}|#{tgt_display}"
+        next if seen[pair_key]
+        seen[pair_key] = true
+
+        target_graph = sol[:targetGraph]&.to_s
         unless target_graph
           latest.each_value do |sub_uri|
             next if sub_uri == graph
-            candidate_acr = sub_uri.split("/")[-3]
-            target_graph = sub_uri if target_uri.include?(candidate_acr)
+            cand_acr = sub_uri.split("/")[-3]
+            target_graph = sub_uri if target_uri.include?(cand_acr)
           end
         end
-
         target_acr = target_graph ? target_graph.split("/")[-3] : nil
-        target_submission_uri = target_graph || target_uri
+        next unless target_acr
 
-        source_obj = LinkedData::Models::OntoLex::LexicalConcept.read_only(
-          id: RDF::URI.new(concept_id),
-          submission: submission
+        source_obj  = LinkedData::Models::OntoLex::LexicalConcept.read_only(
+          id: RDF::URI.new(src_display), submission: source_sub_ro
         )
-        target_ont = LinkedData::Models::Ontology.read_only(
-          id: RDF::IRI.new(target_submission_uri.split("/submissions/").first),
-          acronym: target_acr
-        ) if target_acr
-        target_sub = LinkedData::Models::OntologySubmission.read_only(
-          id: RDF::IRI.new(target_submission_uri),
-          ontology: target_ont
+        target_ont  = LinkedData::Models::Ontology.read_only(
+          id: RDF::IRI.new(target_graph.split("/submissions/").first), acronym: target_acr
         )
-        target_obj = LinkedData::Models::OntoLex::LexicalConcept.read_only(
-          id: RDF::URI.new(target_uri),
-          submission: target_sub,
+        target_sub  = LinkedData::Models::OntologySubmission.read_only(
+          id: RDF::IRI.new(target_graph), ontology: target_ont
+        )
+        target_obj  = LinkedData::Models::OntoLex::LexicalConcept.read_only(
+          id: RDF::URI.new(tgt_display), submission: target_sub,
           prefLabel: sol[:prefLabel]&.to_s
         )
 
-        mappings << LinkedData::Models::Mapping.new(
-          [source_obj, target_obj],
-          sol[:rel_type].to_s
-        )
+        rel = pred_to_label[sol[:pred].to_s] || sol[:pred].to_s.split('#').last
+        mappings << LinkedData::Models::Mapping.new([source_obj, target_obj], rel)
       end
 
-      page_obj = Goo::Base::Page.new(page, size > 0 ? size : total, total, mappings)
-      page_obj
+      # Process reverse results (this graph's concepts are targeted by other graphs)
+      epr.query(rev_query).each do |sol|
+        our_cid         = concept_id || sol[:concept]&.to_s || ''
+        our_entry       = sol[:conceptEntry]&.to_s
+        other_uri       = sol[:source].to_s
+        src_graph_uri   = sol[:sourceGraph]&.to_s
+        other_acr       = src_graph_uri ? src_graph_uri.split("/")[-3] : nil
+        next unless other_acr
+
+        # Our side: conceptEntry is always bound (required clause)
+        src_display = our_entry.present? ? our_entry : our_cid
+        next if src_display.empty?
+
+        # Other side: resolve to entry or skip
+        other_entry    = sol[:sourceEntry]&.to_s
+        other_is_entry = sol[:sourceIsEntry]&.to_s
+        if other_entry.present?
+          tgt_display = other_entry
+        elsif other_is_entry.present?
+          tgt_display = other_uri
+        else
+          next  # other concept has no entry — skip
+        end
+
+        pair_key = "rev:#{src_display}|#{tgt_display}"
+        next if seen[pair_key]
+        seen[pair_key] = true
+
+        source_obj = LinkedData::Models::OntoLex::LexicalConcept.read_only(
+          id: RDF::URI.new(src_display), submission: source_sub_ro
+        )
+        other_ont  = LinkedData::Models::Ontology.read_only(
+          id: RDF::IRI.new(src_graph_uri.split("/submissions/").first), acronym: other_acr
+        )
+        other_sub  = LinkedData::Models::OntologySubmission.read_only(
+          id: RDF::IRI.new(src_graph_uri), ontology: other_ont
+        )
+        target_obj = LinkedData::Models::OntoLex::LexicalConcept.read_only(
+          id: RDF::URI.new(tgt_display), submission: other_sub,
+          prefLabel: sol[:srcLabel]&.to_s
+        )
+
+        rel = pred_to_label[sol[:pred].to_s] || sol[:pred].to_s.split('#').last
+        mappings << LinkedData::Models::Mapping.new([source_obj, target_obj], rel)
+      end
+
+      total = mappings.size
+      return empty_page(page, size) if total == 0
+
+      if size > 0
+        paged = mappings[(page - 1) * size, size] || []
+        Goo::Base::Page.new(page, size, total, paged)
+      else
+        Goo::Base::Page.new(1, total, total, mappings)
+      end
     end
 
     def self.ontolex_mapping_count_for_submission(submission)
       graph  = submission.id.to_s
-      ont_id = graph.split("/")[0..-3].join("/")
       epr    = Goo.sparql_query_client(:main)
 
-      predicate_values = internal_mapping_predicates.values.map { |p| "<#{p}>" }.join(" ")
+      pred_in_list = internal_mapping_predicates.values.map { |p| "<#{Array(p).first}>" }.join(", ")
       query = <<-SPARQL
 SELECT (COUNT(DISTINCT ?target) AS ?c)
 WHERE {
   GRAPH <#{graph}> { ?concept ?pred ?target . }
-  VALUES ?pred { #{predicate_values} }
-  FILTER(!STRSTARTS(str(?target), "#{ont_id}"))
+  FILTER(?pred IN (#{pred_in_list}))
+  MINUS { GRAPH <#{graph}> { ?target a <http://www.w3.org/ns/lemon/ontolex#LexicalConcept> . } }
 }
       SPARQL
 
       epr.query(query).map { |sol| sol[:c].object.to_i }.first || 0
+    end
+
+    # Given a concept URI and its submission, returns cross-ontology SKOS entries
+    # linked via skos:closeMatch, skos:exactMatch, and skos:related.
+    #
+    # For each matching concept in another ontology, finds all lexical entries that
+    # evoke that concept and collects their writtenRep values.
+    #
+    # Returns a hash:
+    #   {
+    #     'closeMatch' => [{ ontology_acronym: 'ONT', entry_id: 'http://...', written_reps: ['word'] }, ...],
+    #     'exactMatch' => [...],
+    #     'related'    => [...]
+    #   }
+    # Only relation types with at least one result are included.
+    def self.ontolex_skos_cross_entries(submission, concept_id)
+      return {} unless submission && concept_id && !concept_id.empty?
+
+      epr    = Goo.sparql_query_client(:main)
+      graph  = submission.id.to_s
+
+      pred_in_list = SKOS_TERM_MAPPING_PREDICATES.values
+                                                  .map { |uri| "<#{uri}>" }.join(", ")
+      # Inverse map from URI to relation type key
+      predicate_to_key = SKOS_TERM_MAPPING_PREDICATES.invert
+
+      query = <<-SPARQL
+SELECT DISTINCT ?predicate ?targetGraph ?targetEntry ?writtenRep ?language
+WHERE {
+  GRAPH <#{graph}> {
+    <#{concept_id}> ?predicate ?targetConcept .
+  }
+  FILTER(?predicate IN (#{pred_in_list}))
+  MINUS { GRAPH <#{graph}> { ?targetConcept a <http://www.w3.org/ns/lemon/ontolex#LexicalConcept> . } }
+  GRAPH ?targetGraph {
+    ?targetEntry <http://www.w3.org/ns/lemon/ontolex#evokes> ?targetConcept .
+    OPTIONAL {
+      ?targetEntry <http://purl.org/dc/terms/language> ?language .
+    }
+    OPTIONAL {
+      ?targetEntry <http://www.w3.org/ns/lemon/ontolex#lexicalForm> ?targetForm .
+      ?targetForm <http://www.w3.org/ns/lemon/ontolex#writtenRep> ?writtenRep .
+    }
+  }
+  FILTER(?targetGraph != <#{graph}>)
+}
+      SPARQL
+
+      # Accumulate: entry_id -> { rel_type, ontology_acronym, written_reps[] }
+      entries_by_id = {}
+
+      begin
+        epr.query(query).each do |sol|
+          pred_uri     = sol[:predicate].to_s
+          target_graph = sol[:targetGraph].to_s
+          target_entry = sol[:targetEntry].to_s
+          written_rep  = sol[:writtenRep] ? sol[:writtenRep].object.to_s : nil
+
+          rel_type = predicate_to_key[pred_uri] || pred_uri.split('#').last
+          acr = target_graph.split("/")[-3]
+
+          language = sol[:language] ? sol[:language].to_s.split('/').last : nil
+
+          unless entries_by_id.key?(target_entry)
+            entries_by_id[target_entry] = {
+              rel_type:         rel_type,
+              ontology_acronym: acr,
+              entry_id:         target_entry,
+              written_reps:     [],
+              language:         language
+            }
+          end
+
+          entries_by_id[target_entry][:language] ||= language if language
+
+          if written_rep && !written_rep.empty?
+            entries_by_id[target_entry][:written_reps] << written_rep
+            entries_by_id[target_entry][:written_reps].uniq!
+          end
+        end
+      rescue StandardError => e
+        return {}
+      end
+
+      result = {}
+      entries_by_id.each_value do |entry|
+        rel = entry[:rel_type]
+        next unless SKOS_TERM_MAPPING_PREDICATES.key?(rel)
+
+        result[rel] ||= []
+        result[rel] << {
+          ontology_acronym: entry[:ontology_acronym],
+          entry_id:         entry[:entry_id],
+          written_reps:     entry[:written_reps],
+          language:         entry[:language]
+        }
+      end
+
+      result
     end
 
     private
